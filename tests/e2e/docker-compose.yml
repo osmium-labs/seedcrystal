@@ -1,0 +1,85 @@
+# Osmium end-to-end gate: three testnet nodes, the seeder serving their seed zone, and a
+# fresh client that must take its first peers from the seeder's DNS answers.
+# Run through `cargo test --test e2e -- --ignored` (see README.md); the test picks the
+# project name and tears everything down.
+#
+# 11.99.0.0/24 is not a reserved range, so the nodes' address managers keep it. The network
+# is internal: no container can reach the internet.
+
+x-osmium: &osmium
+  build:
+    context: .
+    dockerfile: osmium.Dockerfile
+  image: seedcrystal-e2e-osmium:1.2.0
+  stop_grace_period: 5s
+
+services:
+  node1:
+    <<: *osmium
+    command: [
+      -testnet, -datadir=/data, -printtoconsole=1, -listen=1, -dnsseed=0, -upnp=0, -natpmp=0, -listenonion=0,
+      -bind=11.99.0.11, -addnode=11.99.0.12, -addnode=11.99.0.13,
+    ]
+    networks: { seednet: { ipv4_address: 11.99.0.11 } }
+  node2:
+    <<: *osmium
+    command: [
+      -testnet, -datadir=/data, -printtoconsole=1, -listen=1, -dnsseed=0, -upnp=0, -natpmp=0, -listenonion=0,
+      -bind=11.99.0.12, -addnode=11.99.0.11, -addnode=11.99.0.13,
+    ]
+    networks: { seednet: { ipv4_address: 11.99.0.12 } }
+  node3:
+    <<: *osmium
+    command: [
+      -testnet, -datadir=/data, -printtoconsole=1, -listen=1, -dnsseed=0, -upnp=0, -natpmp=0, -listenonion=0,
+      -bind=11.99.0.13, -addnode=11.99.0.11, -addnode=11.99.0.12,
+    ]
+    networks: { seednet: { ipv4_address: 11.99.0.13 } }
+
+  seeder:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/seeder.Dockerfile
+    image: seedcrystal-e2e-seeder:local
+    command: [run, --config, /etc/seedcrystal/seeder.toml]
+    environment:
+      RUST_LOG: debug
+      NO_COLOR: "1"
+    volumes:
+      - ./osmium-seeder.toml:/etc/seedcrystal/seeder.toml:ro
+      # Resolve through the seeder itself, so its bootstrap lookup never leaves the network.
+      - ./resolv.conf:/etc/resolv.conf:ro
+    networks: { seednet: { ipv4_address: 11.99.0.2 } }
+    depends_on: [node1, node2, node3]
+    stop_grace_period: 5s
+    # Ready once the crawl has made a node servable: x405 asks for exactly the services
+    # these nodes advertise. It is deliberately not x1, the name the client queries, so a
+    # seeder that answers x1 wrongly still starts the client and fails on the client's log.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - dig +short +time=1 +tries=1 @127.0.0.1 x405.testnet-seed.osmium.space A | grep -Eq '^11\.99\.0\.1[123]$'
+      interval: 2s
+      timeout: 3s
+      retries: 150
+      start_period: 0s
+
+  client:
+    <<: *osmium
+    # Fresh, empty datadir and default -dnsseed: on an empty address book the node queries
+    # x1.testnet-seed.osmium.space through the system resolver, which is the seeder.
+    command: [-testnet, -datadir=/data, -debuglogfile=/data/debug.log, -upnp=0, -natpmp=0, -listenonion=0]
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+    dns: [11.99.0.2]
+    networks: { seednet: { ipv4_address: 11.99.0.20 } }
+    depends_on:
+      seeder: { condition: service_healthy }
+
+networks:
+  seednet:
+    internal: true
+    ipam:
+      config:
+        - subnet: 11.99.0.0/24
+          gateway: 11.99.0.1

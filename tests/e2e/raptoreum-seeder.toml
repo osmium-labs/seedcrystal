@@ -1,0 +1,17 @@
+# Seeder config for the Raptoreum end-to-end gate (tests/e2e/raptoreum-compose.yml).
+# It serves Raptoreum testnet's literal seed zone on the isolated test network. The node
+# also lists a bare IP as a seed; it queries x1.<ip>, which this seeder simply never answers.
+# allow_private stays false: 11.99.0.0/24 is not a reserved range, so Raptoreum's
+# address manager keeps it just as Osmium's does.
+
+[dns]
+listen = ["0.0.0.0:53"]
+
+[[network]]
+preset = "raptoreum-testnet"
+seed = "lbtn.raptoreum.com"
+nameserver = "seed-ns.raptoreum.com"
+mailbox = "hostmaster.raptoreum.com"
+data_dir = "/var/lib/seedcrystal"
+bootstrap = ["11.99.0.21:10230", "11.99.0.22:10230", "11.99.0.23:10230"]
+allow_private = false

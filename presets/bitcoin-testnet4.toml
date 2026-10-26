@@ -1,0 +1,18 @@
+# Every value is cited from bitcoin/bitcoin@v32.0.
+
+id = "bitcoin-testnet4"
+magic = "1c163f28"            # src/kernel/chainparams.cpp:381
+default_port = 48333          # src/kernel/chainparams.cpp:385
+protocol_version = 70017      # src/node/protocol_version.h:12
+min_peer_version = 31800      # src/node/protocol_version.h:18
+version_trailer = "none"
+block_interval_secs = 600     # src/kernel/chainparams.cpp:364 (nPowTargetSpacing)
+# src/protocol.h:87: sendaddrv2 (BIP155) shipped with protocol 70016; the source does not gate it
+# on a version.
+addrv2_min_version = 70016
+# src/protocol.h:366: SeedsServiceFlags = NODE_NETWORK | NODE_WITNESS. `filters` are the
+# service-bit combinations enumerating seeders publish.
+seed_flags = 0x9
+filters = [0x1, 0x5, 0x9, 0xd, 0x49, 0x409, 0x449]
+bootstrap_dns = ["seed.testnet4.bitcoin.sprovoost.nl", "seed.testnet4.wiz.biz"]  # src/kernel/chainparams.cpp:406
+bootstrap_fixed = []

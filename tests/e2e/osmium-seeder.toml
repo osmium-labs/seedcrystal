@@ -1,0 +1,14 @@
+# Seeder config for the Osmium end-to-end gate (tests/e2e/docker-compose.yml).
+# It serves Osmium testnet's literal seed zone on the isolated test network.
+
+[dns]
+listen = ["0.0.0.0:53"]
+
+[[network]]
+preset = "osmium-testnet"
+seed = "testnet-seed.osmium.space"
+nameserver = "seed-ns.osmium.space"
+mailbox = "hostmaster.osmium.space"
+data_dir = "/var/lib/seedcrystal"
+bootstrap = ["11.99.0.11:19969"]
+allow_private = false

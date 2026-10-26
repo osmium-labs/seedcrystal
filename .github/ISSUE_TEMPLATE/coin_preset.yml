@@ -1,0 +1,24 @@
+name: Coin preset
+description: Ask for a preset for a coin, or offer one.
+labels: [preset]
+body:
+  - type: input
+    id: coin
+    attributes:
+      label: Coin and network
+      placeholder: Examplecoin mainnet
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Public source repository and release tag
+      description: Preset values are taken from the coin's public source; see CONTRIBUTING.md.
+      placeholder: https://github.com/example/examplecoin, tag v1.2.3
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything unusual
+      description: A different version message, a non-default checksum, a fork height that changes the peer version floor, seed names nodes query.

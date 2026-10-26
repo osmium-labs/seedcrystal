@@ -1,0 +1,17 @@
+# Every value is cited from osmium-labs/osmium@f61996d26.
+
+id = "osmium-mainnet"
+magic = "4f534d49"            # src/chainparams.cpp:230
+default_port = 9969           # src/chainparams.cpp:234
+protocol_version = 70231      # src/version.h:14
+min_peer_version = 70215      # src/version.h:20
+version_trailer = "dash"
+block_interval_secs = 90      # src/chainparams.cpp:187 (nPowTargetSpacing)
+addrv2_min_version = 70223    # src/version.h:38
+# The DNS seed lookup (src/net.cpp:2166) queries x<GetDesirableServiceFlags(NODE_NONE)>, which is
+# NODE_NETWORK (src/protocol.cpp:251), so nodes query x1.
+seed_flags = 0x1
+filters = [0x1, 0x5]
+bootstrap_dns = ["dnsseed.osmium.space"]  # src/chainparams.cpp:252
+# src/chainparamsseeds.h:10, BIP155 tuples decoded.
+bootstrap_fixed = ["38.242.232.225:9969", "207.244.239.208:9969", "154.26.136.8:9969"]

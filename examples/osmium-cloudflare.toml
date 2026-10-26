@@ -1,0 +1,19 @@
+# Seedcrystal example: seed Osmium mainnet as dnsseed.osmium.space through Cloudflare.
+#
+# No port 53 and no nameserver of your own: seedcrystal writes A/AAAA records into the
+# Cloudflare zone that holds dnsseed.osmium.space, and Cloudflare answers the queries.
+# Provide the API token either in `token_file` or in the environment variable
+# SEEDCRYSTAL_CLOUDFLARE_TOKEN (not both). It is never a config key.
+
+[[network]]
+preset = "osmium-mainnet"
+seed = "dnsseed.osmium.space"          # must lie inside the Cloudflare zone
+data_dir = "/var/lib/seedcrystal"
+publish = "cloudflare"
+
+[network.cloudflare]
+zone_id = "0123456789abcdef0123456789abcdef"   # zone Overview page, "API" section
+token_file = "/etc/seedcrystal/cloudflare.token"
+# ttl = 60              # seconds, at least 60
+# interval_secs = 300   # how often records are brought in line with the crawl
+# dry_run = false       # true: log what would change, change nothing

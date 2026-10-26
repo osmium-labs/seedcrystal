@@ -1,0 +1,63 @@
+# Seedcrystal as a system service.
+#
+# Install:
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin seedcrystal
+#   sudo install -m 755 target/release/seedcrystal /usr/local/bin/seedcrystal
+#   sudo install -d -m 750 -o root -g seedcrystal /etc/seedcrystal
+#   sudo install -m 640 -o root -g seedcrystal examples/osmium.toml /etc/seedcrystal/seedcrystal.toml
+#   sudoedit /etc/seedcrystal/seedcrystal.toml       # your preset and names
+#   sudo install -m 644 contrib/systemd/seedcrystal.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now seedcrystal
+#
+# Keep `data_dir = "/var/lib/seedcrystal"` in the config: systemd creates that directory and gives
+# it to the service, and every other path is read-only to it. In Cloudflare mode, keep the token
+# in /etc/seedcrystal/cloudflare.token, owned by seedcrystal and mode 600. Run doctor and seeds
+# as the service user: sudo -u seedcrystal seedcrystal doctor --config /etc/seedcrystal/seedcrystal.toml
+
+[Unit]
+Description=Seedcrystal DNS seeder
+Documentation=https://github.com/osmium-labs/seedcrystal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=seedcrystal
+Group=seedcrystal
+ExecStart=/usr/local/bin/seedcrystal run --config /etc/seedcrystal/seedcrystal.toml
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=30
+# A publisher in the middle of a cycle finishes its API calls before it stops.
+TimeoutStopSec=180
+
+# Port 53 without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+StateDirectory=seedcrystal
+StateDirectoryMode=0750
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

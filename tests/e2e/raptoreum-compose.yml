@@ -1,0 +1,86 @@
+# Raptoreum end-to-end gate: three testnet nodes, the seeder serving their seed zone, and a
+# fresh client that must take its first peers from the seeder's DNS answers.
+# Run through `cargo test --test e2e -- --ignored` (see README.md); the test picks the
+# project name and tears everything down.
+#
+# 11.99.0.0/24 is not a reserved range, so the nodes' address managers keep it. The network
+# is internal: no container can reach the internet.
+
+x-raptoreum: &raptoreum
+  build:
+    context: .
+    dockerfile: raptoreum.Dockerfile
+  image: seedcrystal-e2e-raptoreum:2.0.3.01
+  stop_grace_period: 5s
+# Every node runs with -disablewallet=1: the test needs no wallet, and skipping it keeps startup fast.
+
+services:
+  node1:
+    <<: *raptoreum
+    command: [
+      -testnet, -datadir=/data, -printtoconsole=1, -listen=1, -dnsseed=0, -upnp=0, -natpmp=0, -listenonion=0, -disablewallet=1,
+      -bind=11.99.0.21, -addnode=11.99.0.22, -addnode=11.99.0.23,
+    ]
+    networks: { seednet: { ipv4_address: 11.99.0.21 } }
+  node2:
+    <<: *raptoreum
+    command: [
+      -testnet, -datadir=/data, -printtoconsole=1, -listen=1, -dnsseed=0, -upnp=0, -natpmp=0, -listenonion=0, -disablewallet=1,
+      -bind=11.99.0.22, -addnode=11.99.0.21, -addnode=11.99.0.23,
+    ]
+    networks: { seednet: { ipv4_address: 11.99.0.22 } }
+  node3:
+    <<: *raptoreum
+    command: [
+      -testnet, -datadir=/data, -printtoconsole=1, -listen=1, -dnsseed=0, -upnp=0, -natpmp=0, -listenonion=0, -disablewallet=1,
+      -bind=11.99.0.23, -addnode=11.99.0.21, -addnode=11.99.0.22,
+    ]
+    networks: { seednet: { ipv4_address: 11.99.0.23 } }
+
+  seeder:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/seeder.Dockerfile
+    image: seedcrystal-e2e-seeder:local
+    command: [run, --config, /etc/seedcrystal/seeder.toml]
+    environment:
+      RUST_LOG: debug
+      NO_COLOR: "1"
+    volumes:
+      - ./raptoreum-seeder.toml:/etc/seedcrystal/seeder.toml:ro
+      # Resolve through the seeder itself, so its bootstrap lookup never leaves the network.
+      - ./resolv.conf:/etc/resolv.conf:ro
+    networks: { seednet: { ipv4_address: 11.99.0.2 } }
+    depends_on: [node1, node2, node3]
+    stop_grace_period: 5s
+    # Ready once the crawl has made a node servable: x5 is the other service filter
+    # the seeder serves. It is deliberately not x1, the name the client queries, so a
+    # seeder that answers x1 wrongly still starts the client and fails on the client's log.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - dig +short +time=1 +tries=1 @127.0.0.1 x5.lbtn.raptoreum.com A | grep -Eq '^11\.99\.0\.2[123]$'
+      interval: 2s
+      timeout: 3s
+      retries: 150
+      start_period: 0s
+
+  client:
+    <<: *raptoreum
+    # Fresh, empty datadir and default -dnsseed: on an empty address book the node queries
+    # x1.lbtn.raptoreum.com through the system resolver, which is the seeder.
+    command: [-testnet, -datadir=/data, -debuglogfile=/data/debug.log, -upnp=0, -natpmp=0, -listenonion=0, -disablewallet=1]
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+    dns: [11.99.0.2]
+    networks: { seednet: { ipv4_address: 11.99.0.20 } }
+    depends_on:
+      seeder: { condition: service_healthy }
+
+networks:
+  seednet:
+    internal: true
+    ipam:
+      config:
+        - subnet: 11.99.0.0/24
+          gateway: 11.99.0.1

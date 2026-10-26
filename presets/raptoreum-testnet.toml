@@ -1,0 +1,25 @@
+# Every value is cited from Raptor3um/raptoreum@2.0.3.01-mainnet
+# (900794ea94ff11023667765173295b459d32732c).
+
+id = "raptoreum-testnet"
+magic = "7472746d"            # src/chainparams.cpp:416-419
+default_port = 10230          # src/chainparams.cpp:420
+protocol_version = 70220      # src/version.h:14 (PROTOCOL_VERSION)
+# src/version.h:22 (MIN_PEER_PROTO_VERSION). The floor is MIN_PEER_PROTO_VERSION once
+# IsFutureActive, else OLD_MIN_PEER_PROTO_VERSION (src/net_processing.cpp:2413, src/version.h:20).
+# nFutureForkBlock = 1000 (src/chainparams.cpp:380): nodes whose tip is past it require
+# MIN_PEER_PROTO_VERSION.
+min_peer_version = 70219
+# src/net_processing.cpp:2429-2445: the fields after relay, the smartnode challenge and flag, are
+# read only under if (!vRecv.empty()), so a version message without them is accepted.
+version_trailer = "none"
+block_interval_secs = 60      # src/chainparams.cpp:372 (nPowTargetSpacing)
+# No addrv2_min_version: there is no sendaddrv2 anywhere under src/ (git grep -i).
+# The DNS name is x%x.<seed> from GetDesirableServiceFlags(NODE_NONE) (src/net.cpp:1939-1940), which
+# returns NODE_NETWORK (src/protocol.cpp:208-212), and NODE_NETWORK = 1 (src/protocol.h:290), so
+# nodes query x1.
+seed_flags = 0x1
+filters = [0x1, 0x5]
+bootstrap_dns = ["lbtn.raptoreum.com"]   # src/chainparams.cpp:437
+# src/chainparams.cpp:436: the IP entry in vSeeds, on default_port.
+bootstrap_fixed = ["47.151.9.131:10230"]

@@ -1,0 +1,14 @@
+# Seedcrystal example: seed Osmium mainnet as dnsseed.osmium.space.
+#
+# Port 53 needs root or `setcap 'cap_net_bind_service=+ep' ./seedcrystal`.
+# To test on another port, set SEEDCRYSTAL_DNS_LISTEN=127.0.0.1:5353 (overrides dns.listen).
+
+[dns]
+listen = ["0.0.0.0:53", "[::]:53"]
+
+[[network]]
+preset = "osmium-mainnet"
+seed = "dnsseed.osmium.space"
+nameserver = "seed-ns.osmium.space"
+mailbox = "hostmaster.osmium.space"
+data_dir = "/var/lib/seedcrystal"

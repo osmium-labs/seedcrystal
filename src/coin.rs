@@ -1,0 +1,484 @@
+//! Coin presets: the per-network constants a seeder needs to speak to a coin's peers.
+
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use serde::Deserialize;
+
+/// What follows the relay byte of our `version` message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VersionTrailer {
+    /// Nothing: the payload ends after the relay byte.
+    #[default]
+    None,
+    /// A 32-byte random challenge, then a masternode flag that is always false.
+    Dash,
+}
+
+/// Where `sendaddrv2` goes in the handshake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddrV2Placement {
+    #[default]
+    BeforeVerack,
+    /// Immediately after our `verack`.
+    AfterVerack,
+}
+
+/// P2P message header checksum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Checksum {
+    #[default]
+    Sha256d,
+    Groestl512d,
+}
+
+/// A block known to be on this chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checkpoint {
+    pub height: i32,
+    /// Wire order: the reverse of the explorer-order hex written in the preset.
+    pub hash: [u8; 32],
+}
+
+impl Checkpoint {
+    /// The hash as explorers show it: 64 lowercase hex digits, reversed from wire order.
+    pub fn display_hash(&self) -> String {
+        self.hash.iter().rev().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
+/// From `height` on (inclusive), peers below `version` are unservable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VersionStep {
+    pub height: i32,
+    pub version: i32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCheckpoint {
+    height: i32,
+    hash: String,
+}
+
+/// Everything the crawler and DNS front end need to know about one network.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoinPreset {
+    pub id: String,
+    pub magic: [u8; 4],
+    pub default_port: u16,
+    /// Protocol version we send in `version`.
+    pub protocol_version: i32,
+    /// Peers below this are unservable and we disconnect.
+    pub min_peer_version: i32,
+    pub version_trailer: VersionTrailer,
+    /// `None` means the coin has no BIP155 (`sendaddrv2`).
+    pub addrv2_min_version: Option<i32>,
+    pub addrv2_placement: AddrV2Placement,
+    pub checksum: Checksum,
+    /// The effective block spacing.
+    pub block_interval_secs: u32,
+    /// Blocks a node may trail the tip and still be servable.
+    pub tip_tolerance: i32,
+    /// Servable floor; at least `min_peer_version`.
+    pub min_serve_version: i32,
+    /// Raises the servable floor from the given heights on.
+    pub serve_version_schedule: Vec<VersionStep>,
+    /// Absolute servable height floor.
+    pub min_height: i32,
+    pub checkpoint: Option<Checkpoint>,
+    /// Upper bound on `getaddr` collection.
+    pub addr_wait: Duration,
+    /// The services in the `x<hex>` name the coin's nodes query.
+    pub seed_flags: u64,
+    /// `x<hex>` names Cloudflare mode publishes, since it must create each name in advance; must
+    /// contain `seed_flags`.
+    pub filters: Vec<u64>,
+    pub bootstrap_dns: Vec<String>,
+    pub bootstrap_fixed: Vec<SocketAddr>,
+}
+
+impl CoinPreset {
+    /// The lowest peer version servable at chain height `tip`.
+    pub fn serve_floor(&self, tip: i32) -> i32 {
+        serve_floor(self.min_serve_version, &self.serve_version_schedule, tip)
+    }
+}
+
+/// `base`, raised by every schedule step at or below `tip`.
+pub fn serve_floor(base: i32, schedule: &[VersionStep], tip: i32) -> i32 {
+    schedule
+        .iter()
+        .filter(|step| step.height <= tip)
+        .map(|step| step.version)
+        .fold(base, i32::max)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PresetError {
+    #[error("unknown preset `{id}`; available: {}", .available.join(", "))]
+    Unknown { id: String, available: Vec<String> },
+    #[error("preset parse error: {0}")]
+    Parse(String),
+    #[error("invalid preset: {0}")]
+    Invalid(String),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPreset {
+    id: String,
+    magic: String,
+    default_port: u16,
+    protocol_version: i32,
+    min_peer_version: i32,
+    version_trailer: VersionTrailer,
+    addrv2_min_version: Option<i32>,
+    #[serde(default)]
+    addrv2_placement: AddrV2Placement,
+    #[serde(default)]
+    checksum: Checksum,
+    block_interval_secs: u32,
+    tip_tolerance: Option<i32>,
+    min_serve_version: Option<i32>,
+    #[serde(default)]
+    serve_version_schedule: Vec<VersionStep>,
+    #[serde(default)]
+    min_height: i32,
+    checkpoint: Option<RawCheckpoint>,
+    addr_wait_secs: Option<u64>,
+    seed_flags: u64,
+    filters: Vec<u64>,
+    bootstrap_dns: Vec<String>,
+    bootstrap_fixed: Vec<SocketAddr>,
+}
+
+/// `(id, TOML text)` for every `presets/*.toml`, sorted by id; generated by `build.rs`.
+const BUILTIN: &[(&str, &str)] = include!(concat!(env!("OUT_DIR"), "/presets.rs"));
+
+pub fn builtin_ids() -> impl Iterator<Item = &'static str> {
+    BUILTIN.iter().map(|(id, _)| *id)
+}
+
+pub fn builtin(id: &str) -> Result<CoinPreset, PresetError> {
+    match BUILTIN.iter().find(|(name, _)| *name == id) {
+        Some((_, text)) => from_toml(text),
+        None => Err(PresetError::Unknown {
+            id: id.to_string(),
+            available: builtin_ids().map(str::to_string).collect(),
+        }),
+    }
+}
+
+pub fn from_toml(text: &str) -> Result<CoinPreset, PresetError> {
+    let raw: RawPreset = toml::from_str(text).map_err(|e| PresetError::Parse(e.to_string()))?;
+    let magic = parse_magic(&raw.magic)?;
+    if raw.block_interval_secs == 0 {
+        return Err(PresetError::Invalid(
+            "block_interval_secs must be > 0".into(),
+        ));
+    }
+    let min_serve_version = raw.min_serve_version.unwrap_or(raw.min_peer_version);
+    if min_serve_version < raw.min_peer_version {
+        return Err(PresetError::Invalid(format!(
+            "min_serve_version {min_serve_version} is below min_peer_version {}",
+            raw.min_peer_version
+        )));
+    }
+    for pair in raw.serve_version_schedule.windows(2) {
+        if pair[1].height <= pair[0].height {
+            return Err(PresetError::Invalid(
+                "serve_version_schedule heights must be strictly ascending".into(),
+            ));
+        }
+        if pair[1].version < pair[0].version {
+            return Err(PresetError::Invalid(
+                "serve_version_schedule versions must not decrease".into(),
+            ));
+        }
+    }
+    let checkpoint = raw.checkpoint.map(parse_checkpoint).transpose()?;
+    let tip_tolerance = raw
+        .tip_tolerance
+        .unwrap_or_else(|| (7200u32.div_ceil(raw.block_interval_secs) as i32).max(6));
+    if tip_tolerance <= 0 {
+        return Err(PresetError::Invalid(format!(
+            "tip_tolerance {tip_tolerance} must be > 0"
+        )));
+    }
+    if raw.min_height < 0 {
+        return Err(PresetError::Invalid(format!(
+            "min_height {} must not be negative",
+            raw.min_height
+        )));
+    }
+    if raw.addr_wait_secs == Some(0) {
+        return Err(PresetError::Invalid(
+            "addr_wait_secs must be > 0; with 0 every address harvest is empty".into(),
+        ));
+    }
+    if !raw.filters.contains(&raw.seed_flags) {
+        return Err(PresetError::Invalid(format!(
+            "filters must contain seed_flags {:#x}",
+            raw.seed_flags
+        )));
+    }
+    Ok(CoinPreset {
+        id: raw.id,
+        magic,
+        default_port: raw.default_port,
+        protocol_version: raw.protocol_version,
+        min_peer_version: raw.min_peer_version,
+        version_trailer: raw.version_trailer,
+        addrv2_min_version: raw.addrv2_min_version,
+        addrv2_placement: raw.addrv2_placement,
+        checksum: raw.checksum,
+        block_interval_secs: raw.block_interval_secs,
+        tip_tolerance,
+        min_serve_version,
+        serve_version_schedule: raw.serve_version_schedule,
+        min_height: raw.min_height,
+        checkpoint,
+        addr_wait: Duration::from_secs(raw.addr_wait_secs.unwrap_or(30)),
+        seed_flags: raw.seed_flags,
+        filters: raw.filters,
+        bootstrap_dns: raw.bootstrap_dns,
+        bootstrap_fixed: raw.bootstrap_fixed,
+    })
+}
+
+fn parse_checkpoint(raw: RawCheckpoint) -> Result<Checkpoint, PresetError> {
+    if raw.height < 0 {
+        return Err(PresetError::Invalid(format!(
+            "checkpoint height {} must not be negative",
+            raw.height
+        )));
+    }
+    let h = &raw.hash;
+    if h.len() != 64 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(PresetError::Invalid(format!(
+            "checkpoint hash `{h}` must be 64 hex digits"
+        )));
+    }
+    let mut hash = [0u8; 32];
+    for (i, byte) in hash.iter_mut().rev().enumerate() {
+        *byte = u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).expect("validated hex");
+    }
+    Ok(Checkpoint {
+        height: raw.height,
+        hash,
+    })
+}
+
+fn parse_magic(s: &str) -> Result<[u8; 4], PresetError> {
+    let invalid = || PresetError::Invalid(format!("magic `{s}` must be 8 hex digits"));
+    if s.len() != 8 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(invalid());
+    }
+    let mut out = [0u8; 4];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|_| invalid())?;
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A made-up coin, so the parser tests depend on no shipped preset.
+    const SAMPLE: &str = r#"
+id = "examplecoin-mainnet"
+magic = "a1b2c3d4"
+default_port = 12345
+protocol_version = 70016
+min_peer_version = 70001
+version_trailer = "none"
+block_interval_secs = 600
+seed_flags = 0x1
+filters = [0x1, 0x9]
+bootstrap_dns = ["seed.example.org"]
+bootstrap_fixed = ["192.0.2.1:12345"]
+"#;
+
+    #[test]
+    fn sample_parses_every_field() {
+        let p = from_toml(SAMPLE).unwrap();
+        assert_eq!(p.id, "examplecoin-mainnet");
+        assert_eq!(p.magic, [0xa1, 0xb2, 0xc3, 0xd4]);
+        assert_eq!(p.default_port, 12345);
+        assert_eq!((p.protocol_version, p.min_peer_version), (70016, 70001));
+        assert_eq!(p.version_trailer, VersionTrailer::None);
+        assert_eq!(p.addrv2_min_version, None);
+        assert_eq!((p.seed_flags, p.filters), (0x1, vec![0x1, 0x9]));
+        assert_eq!(p.bootstrap_dns, ["seed.example.org"]);
+        assert_eq!(p.bootstrap_fixed, ["192.0.2.1:12345".parse().unwrap()]);
+    }
+
+    #[test]
+    fn every_presets_file_is_built_in() {
+        let mut on_disk: Vec<String> =
+            std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/presets"))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| p.extension().is_some_and(|ext| ext == "toml"))
+                .map(|p| p.file_stem().unwrap().to_str().unwrap().to_string())
+                .collect();
+        on_disk.sort();
+        assert!(!on_disk.is_empty());
+        assert_eq!(builtin_ids().collect::<Vec<_>>(), on_disk);
+    }
+
+    #[test]
+    fn every_builtin_is_valid_and_named_after_its_file() {
+        for id in builtin_ids() {
+            let p = builtin(id).unwrap_or_else(|e| panic!("presets/{id}.toml: {e}"));
+            assert_eq!(p.id, id, "presets/{id}.toml: `id` must match the file name");
+            assert!(p.block_interval_secs > 0);
+        }
+    }
+
+    #[test]
+    fn every_builtin_names_the_source_it_cites() {
+        for (id, text) in BUILTIN {
+            let first = text.lines().next().unwrap_or_default();
+            assert!(
+                first.starts_with("# Every value is cited from ") && first.contains('@'),
+                "presets/{id}.toml: start with `# Every value is cited from <repo>@<tag or commit>`"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_field_is_named() {
+        let err = from_toml(&format!("{SAMPLE}\nmagik = \"00\"")).unwrap_err();
+        assert!(err.to_string().contains("magik"));
+    }
+
+    #[test]
+    fn filters_must_contain_seed_flags() {
+        let text = SAMPLE.replace("filters = [0x1, 0x9]", "filters = [0x9]");
+        assert!(matches!(from_toml(&text), Err(PresetError::Invalid(_))));
+    }
+
+    #[test]
+    fn bad_magic_is_invalid() {
+        let text = SAMPLE.replace("\"a1b2c3d4\"", "\"a1b2c3\"");
+        assert!(matches!(from_toml(&text), Err(PresetError::Invalid(_))));
+    }
+
+    #[test]
+    fn unknown_preset_lists_available() {
+        let e = builtin("no-such-coin").unwrap_err().to_string();
+        assert!(builtin_ids().all(|id| e.contains(id)), "{e}");
+    }
+
+    #[test]
+    fn tolerance_is_two_hours_of_blocks_with_a_floor() {
+        let p = |secs: u32| {
+            from_toml(&SAMPLE.replace(
+                "block_interval_secs = 600",
+                &format!("block_interval_secs = {secs}"),
+            ))
+            .unwrap()
+        };
+        assert_eq!(p(600).tip_tolerance, 12);
+        assert_eq!(p(90).tip_tolerance, 80);
+        assert_eq!(p(120).tip_tolerance, 60);
+        assert_eq!(p(15).tip_tolerance, 480);
+        assert_eq!(p(7200).tip_tolerance, 6);
+        let o = from_toml(&format!("{SAMPLE}\ntip_tolerance = 3")).unwrap();
+        assert_eq!(o.tip_tolerance, 3);
+    }
+
+    #[test]
+    fn defaults_for_new_fields() {
+        let p = from_toml(SAMPLE).unwrap();
+        assert_eq!(p.version_trailer, VersionTrailer::None);
+        assert_eq!(p.addrv2_placement, AddrV2Placement::BeforeVerack);
+        assert_eq!(p.checksum, Checksum::Sha256d);
+        assert_eq!(p.min_serve_version, p.min_peer_version);
+        assert_eq!((p.min_height, p.checkpoint), (0, None));
+        assert_eq!(p.addr_wait, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn serve_floor_follows_the_schedule() {
+        let p = from_toml(&format!(
+            "{SAMPLE}\nmin_serve_version = 70010\n\
+             serve_version_schedule = [{{ height = 100, version = 70012 }}, {{ height = 200, version = 70015 }}]"
+        ))
+        .unwrap();
+        assert_eq!(p.serve_floor(99), 70010);
+        assert_eq!(p.serve_floor(100), 70012);
+        assert_eq!(p.serve_floor(250), 70015);
+    }
+
+    #[test]
+    fn bad_schedules_and_floors_are_invalid() {
+        for extra in [
+            "serve_version_schedule = [{ height = 200, version = 70012 }, { height = 100, version = 70015 }]",
+            "serve_version_schedule = [{ height = 100, version = 70015 }, { height = 200, version = 70012 }]",
+            "min_serve_version = 70000", // below min_peer_version 70001
+        ] {
+            assert!(
+                matches!(
+                    from_toml(&format!("{SAMPLE}\n{extra}")),
+                    Err(PresetError::Invalid(_))
+                ),
+                "{extra}"
+            );
+        }
+        let zero = SAMPLE.replace("block_interval_secs = 600", "block_interval_secs = 0");
+        assert!(matches!(from_toml(&zero), Err(PresetError::Invalid(_))));
+    }
+
+    /// Each of these parses, but would silently empty the seed or every harvest.
+    #[test]
+    fn values_that_break_a_network_are_invalid() {
+        let hash = "00000000000000000001a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7";
+        for (extra, field) in [
+            ("addr_wait_secs = 0".to_string(), "addr_wait_secs"),
+            ("tip_tolerance = 0".to_string(), "tip_tolerance"),
+            ("tip_tolerance = -5".to_string(), "tip_tolerance"),
+            ("min_height = -1".to_string(), "min_height"),
+            (
+                format!("checkpoint = {{ height = -1, hash = \"{hash}\" }}"),
+                "checkpoint height",
+            ),
+        ] {
+            match from_toml(&format!("{SAMPLE}\n{extra}")) {
+                Err(PresetError::Invalid(msg)) => assert!(msg.contains(field), "{extra}: {msg}"),
+                other => panic!("{extra}: expected Invalid, got {other:?}"),
+            }
+        }
+        for ok in [
+            "addr_wait_secs = 1".to_string(),
+            "tip_tolerance = 1".to_string(),
+            "min_height = 0".to_string(),
+            format!("checkpoint = {{ height = 0, hash = \"{hash}\" }}"),
+        ] {
+            from_toml(&format!("{SAMPLE}\n{ok}")).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+    }
+
+    #[test]
+    fn checkpoint_hash_is_stored_in_wire_order() {
+        let hex = "00000000000000000001a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7";
+        let p = from_toml(&format!(
+            "{SAMPLE}\ncheckpoint = {{ height = 840000, hash = \"{hex}\" }}"
+        ))
+        .unwrap();
+        let c = p.checkpoint.unwrap();
+        assert_eq!(c.height, 840000);
+        assert_eq!(c.hash[0], 0xf7);
+        assert_eq!(c.hash[31], 0x00);
+        assert_eq!(c.display_hash(), hex);
+        let short = format!("{SAMPLE}\ncheckpoint = {{ height = 1, hash = \"abcd\" }}");
+        assert!(matches!(from_toml(&short), Err(PresetError::Invalid(_))));
+    }
+}
