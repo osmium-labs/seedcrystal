@@ -31,7 +31,7 @@ pub struct NodeStore {
     conn: Mutex<Connection>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Good {
         version: i32,
@@ -39,6 +39,8 @@ pub enum Outcome {
         height: i32,
         harvested: bool,
         chain: ChainCheck,
+        /// The peer's `version` user agent, as decoded.
+        user_agent: String,
     },
     Bad,
     /// The peer answered, but its headers do not build on the checkpoint.
@@ -393,7 +395,7 @@ impl NodeStore {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let mut stats = Stats::decode(&stats_s).unwrap_or_default();
-        let verdict = match outcome {
+        let verdict = match &outcome {
             Outcome::Good {
                 chain: ChainCheck::Verified,
                 ..
@@ -401,12 +403,13 @@ impl NodeStore {
             Outcome::WrongChain { .. } => Some(CHAIN_WRONG),
             _ => None,
         };
-        match outcome {
+        match &outcome {
             Outcome::Good {
                 version,
                 services,
                 height,
                 harvested,
+                user_agent,
                 ..
             } => {
                 stats.update(true, now);
@@ -414,18 +417,20 @@ impl NodeStore {
                     "UPDATE nodes SET services = ?3, version = ?4, height = ?5, stats = ?6,
                          last_ok = 1, last_good = ?7, tried = 1, consecutive_failures = 0,
                          next_try = ?8,
-                         last_harvest = CASE WHEN ?9 THEN ?7 ELSE last_harvest END
+                         last_harvest = CASE WHEN ?9 THEN ?7 ELSE last_harvest END,
+                         user_agent = ?10
                      WHERE ip = ?1 AND port = ?2",
                     params![
                         ip_s,
                         port,
-                        services as i64,
+                        *services as i64,
                         version,
                         height,
                         stats.encode(),
                         now,
                         now + GOOD_RETRY,
-                        harvested
+                        harvested,
+                        user_agent
                     ],
                 )?;
             }
@@ -650,6 +655,7 @@ mod tests {
             height,
             harvested: false,
             chain: ChainCheck::NotChecked,
+            user_agent: String::new(),
         }
     }
 
@@ -695,6 +701,7 @@ mod tests {
                     height: 1000,
                     harvested: false,
                     chain: ChainCheck::NotChecked,
+                    user_agent: String::new(),
                 },
                 t,
                 None,
@@ -760,6 +767,7 @@ mod tests {
             height,
             harvested: false,
             chain: ChainCheck::NotChecked,
+            user_agent: String::new(),
         }
     }
 
@@ -874,6 +882,7 @@ mod tests {
                     height: 1000,
                     harvested: false,
                     chain: ChainCheck::NotChecked,
+                    user_agent: String::new(),
                 },
                 100,
                 None,
@@ -969,6 +978,7 @@ mod tests {
                 height,
                 harvested: false,
                 chain: ChainCheck::Verified,
+                user_agent: String::new(),
             };
             store.record(sa(ip), outcome, t, Some(reference)).unwrap();
         };
@@ -1043,6 +1053,7 @@ mod tests {
                     height: 9_000_000,
                     harvested: false,
                     chain: ChainCheck::NotChecked,
+                    user_agent: String::new(),
                 },
                 t,
                 None,
@@ -1455,6 +1466,54 @@ mod tests {
         assert!(!dir.path().join("nodes.db.v2.bak.tmp").exists());
     }
 
+    fn agent_of(store: &NodeStore, addr: &str) -> String {
+        let a = sa(addr);
+        store
+            .conn()
+            .query_row(
+                "SELECT user_agent FROM nodes WHERE ip = ?1 AND port = ?2",
+                params![a.ip().to_string(), a.port()],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn good_agent(agent: &str) -> Outcome {
+        Outcome::Good {
+            version: 70216,
+            services: 1,
+            height: 1000,
+            harvested: false,
+            chain: ChainCheck::NotChecked,
+            user_agent: agent.into(),
+        }
+    }
+
+    #[test]
+    fn user_agent_is_kept_from_the_latest_good_probe() {
+        let (_d, store) = open();
+        let a = "8.8.8.1:8080";
+        store
+            .record(sa(a), good_agent("/Osmium Core:1.1.9/"), 100, None)
+            .unwrap();
+        assert_eq!(agent_of(&store, a), "/Osmium Core:1.1.9/");
+        store.record(sa(a), Outcome::Bad, 200, None).unwrap();
+        assert_eq!(agent_of(&store, a), "/Osmium Core:1.1.9/");
+        store
+            .record(
+                sa(a),
+                Outcome::WrongChain { harvested: false },
+                300,
+                Some("A"),
+            )
+            .unwrap();
+        assert_eq!(agent_of(&store, a), "/Osmium Core:1.1.9/");
+        store
+            .record(sa(a), good_agent("/Osmium Core:1.2.0/"), 400, None)
+            .unwrap();
+        assert_eq!(agent_of(&store, a), "/Osmium Core:1.2.0/");
+    }
+
     #[test]
     fn harvest_flag_once_per_day() {
         let (_d, store) = open();
@@ -1469,6 +1528,7 @@ mod tests {
                     height: 1,
                     harvested: true,
                     chain: ChainCheck::NotChecked,
+                    user_agent: String::new(),
                 },
                 t,
                 None,
@@ -1634,6 +1694,7 @@ mod tests {
             height: 1000,
             harvested: false,
             chain,
+            user_agent: String::new(),
         }
     }
 
@@ -1733,6 +1794,7 @@ mod tests {
                     height: 1000,
                     harvested: true,
                     chain: ChainCheck::Verified,
+                    user_agent: String::new(),
                 },
                 t,
                 Some("A"),

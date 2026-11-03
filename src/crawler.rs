@@ -466,6 +466,7 @@ async fn probe_one(
                 height: r.peer.start_height,
                 harvested: harvest,
                 chain: r.chain,
+                user_agent: r.peer.user_agent,
             },
             r.addrs,
         ),
