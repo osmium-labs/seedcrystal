@@ -4,18 +4,19 @@
 //! seconds supplied by the caller, never read from the clock here.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, params};
+use tracing::info;
 
 use crate::coin::{VersionStep, serve_floor};
 use crate::p2p::ChainCheck;
 use crate::p2p::messages::{AddrEntry, NetAddr};
 use crate::score::Stats;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const GOOD_RETRY: i64 = 15 * 60;
 const BAD_RETRY_MIN: i64 = 5 * 60;
 const BAD_RETRY_MAX: i64 = 24 * 3600;
@@ -164,10 +165,83 @@ fn due_sql(kind: DueKind, allow_private: bool) -> String {
     )
 }
 
+fn has_column(conn: &Connection, name: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('nodes') WHERE name = ?1)",
+        [name],
+        |r| r.get(0),
+    )?)
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// Makes a rename in `path`'s directory durable before the store is changed, so a power loss
+/// cannot leave a migrated store without its backup. Directories cannot be synced this way off
+/// Unix; there it does nothing.
+fn sync_parent_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let dir = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        std::fs::File::open(dir)
+            .and_then(|d| d.sync_all())
+            .with_context(|| format!("syncing directory {}", dir.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Schema 2 to 3: adds `user_agent`. `VACUUM INTO` writes a consistent copy that includes rows
+/// still in the WAL (a plain file copy would miss them); it is written under a temporary name,
+/// synced, renamed and the directory synced, so `<file>.v2.bak` is always a complete database
+/// that survives a power loss. The column and the version change commit together, so a crash
+/// leaves a schema 2 store behind.
+fn migrate_to_v3(conn: &mut Connection, path: &Path) -> Result<()> {
+    let backup = with_suffix(path, ".v2.bak");
+    let partial = with_suffix(path, ".v2.bak.tmp");
+    match std::fs::remove_file(&partial) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(e).with_context(|| format!("removing {}", partial.display()));
+        }
+        _ => {}
+    }
+    let target = partial
+        .to_str()
+        .with_context(|| format!("node store path {} is not UTF-8", path.display()))?;
+    conn.execute("VACUUM INTO ?1", [target])
+        .with_context(|| format!("copying node store to {}", partial.display()))?;
+    std::fs::File::open(&partial)
+        .and_then(|f| f.sync_all())
+        .with_context(|| format!("syncing {}", partial.display()))?;
+    std::fs::rename(&partial, &backup)
+        .with_context(|| format!("renaming {} to {}", partial.display(), backup.display()))?;
+    sync_parent_dir(&backup)?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "ALTER TABLE nodes ADD COLUMN user_agent TEXT NOT NULL DEFAULT '';
+         PRAGMA user_version = 3;",
+    )?;
+    tx.commit()?;
+    info!(
+        "node store {} migrated to schema version 3; the previous version is kept at {}",
+        path.display(),
+        backup.display()
+    );
+    Ok(())
+}
+
 impl NodeStore {
-    /// Opens or creates the store; a store newer than this build is refused.
+    /// Opens or creates the store. A schema 2 store is first copied to `<file>.v2.bak`, then
+    /// migrated in place; a store newer than this build is refused.
     pub fn open(path: &Path) -> Result<NodeStore> {
-        let conn = Connection::open(path)
+        let mut conn = Connection::open(path)
             .with_context(|| format!("opening node store {}", path.display()))?;
         conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -195,6 +269,7 @@ impl NodeStore {
                 first_seen INTEGER NOT NULL,
                 chain INTEGER NOT NULL DEFAULT 0,
                 chain_ref TEXT NOT NULL DEFAULT '',
+                user_agent TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY (ip, port)
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS nodes_new_pub ON nodes (first_seen) WHERE tried = 0 AND routable = 1;
@@ -204,15 +279,19 @@ impl NodeStore {
             CREATE INDEX IF NOT EXISTS nodes_good_any ON nodes (next_try) WHERE tried = 1 AND last_ok = 1;
             CREATE INDEX IF NOT EXISTS nodes_bad_any ON nodes (next_try) WHERE tried = 1 AND last_ok = 0;",
         )?;
+        // A new table has the column already; only an older one is migrated.
+        if !has_column(&conn, "user_agent")? {
+            migrate_to_v3(&mut conn, path)?;
+        }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(NodeStore {
             conn: Mutex::new(conn),
         })
     }
 
-    /// Opens an existing store for reading, for reports. It never creates the file or runs DDL:
-    /// a store at any other schema version is refused, so a report cannot write the live
-    /// database while the service owns it. `query_only` refuses every
+    /// Opens an existing store for reading, for reports. It never creates the file, runs DDL
+    /// or migrates: a store at any other schema version is refused, so a report cannot write
+    /// the live database or its backup while the service owns them. `query_only` refuses every
     /// write. The connection is read-write only so that, as the last one to close, it removes
     /// the `-wal` and `-shm` files it opened; a read-only connection would leave them behind.
     pub fn open_existing(path: &Path) -> Result<NodeStore> {
@@ -225,6 +304,14 @@ impl NodeStore {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .with_context(|| format!("reading node store {}", path.display()))?;
+        if version < SCHEMA_VERSION {
+            anyhow::bail!(
+                "node store {} is schema {version}; start `seedcrystal run` with this build once \
+                 to migrate it (it keeps the old file as {}), then run `seeds`",
+                path.display(),
+                with_suffix(path, ".v2.bak").display()
+            );
+        }
         if version != SCHEMA_VERSION {
             anyhow::bail!(
                 "node store {} is schema {version}; this build reads schema {SCHEMA_VERSION}",
@@ -1181,7 +1268,7 @@ mod tests {
         let v: i64 = c
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
         // An unversioned existing database is adopted at the current version.
         c.pragma_update(None, "user_version", 0).unwrap();
         drop(c);
@@ -1190,11 +1277,182 @@ mod tests {
         let v: i64 = c
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 2);
-        c.pragma_update(None, "user_version", 3).unwrap();
+        assert_eq!(v, 3);
+        c.pragma_update(None, "user_version", 4).unwrap();
         drop(c);
         let err = NodeStore::open(&path).err().unwrap().to_string();
-        assert!(err.contains("schema version 3"), "{err}");
+        assert!(err.contains("schema version 4"), "{err}");
+    }
+
+    /// The `nodes` table exactly as schema version 2 (0.1.0) created it.
+    const V2_TABLE: &str = "CREATE TABLE nodes (
+                ip TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                routable INTEGER NOT NULL,
+                services INTEGER NOT NULL DEFAULT 0,
+                version INTEGER NOT NULL DEFAULT 0,
+                height INTEGER NOT NULL DEFAULT 0,
+                stats TEXT NOT NULL DEFAULT '',
+                last_ok INTEGER NOT NULL DEFAULT 0,
+                last_good INTEGER NOT NULL DEFAULT 0,
+                tried INTEGER NOT NULL DEFAULT 0,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                next_try INTEGER NOT NULL DEFAULT 0,
+                last_harvest INTEGER NOT NULL DEFAULT 0,
+                first_seen INTEGER NOT NULL,
+                chain INTEGER NOT NULL DEFAULT 0,
+                chain_ref TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (ip, port)
+            ) WITHOUT ROWID";
+
+    const V2_COLUMNS: &str = "ip, port, routable, services, version, height, stats, last_ok, \
+         last_good, tried, consecutive_failures, next_try, last_harvest, first_seen, chain, chain_ref";
+
+    fn user_version(c: &Connection) -> i64 {
+        c.query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// Every v2 column of every row, as text, in key order.
+    fn v2_rows(c: &Connection) -> Vec<Vec<String>> {
+        let mut stmt = c
+            .prepare(&format!("SELECT {V2_COLUMNS} FROM nodes ORDER BY ip, port"))
+            .unwrap();
+        let n = stmt.column_count();
+        stmt.query_map([], |r| {
+            (0..n)
+                .map(|i| {
+                    r.get::<_, rusqlite::types::Value>(i)
+                        .map(|v| format!("{v:?}"))
+                })
+                .collect()
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+    }
+
+    /// A v2 store at `path` whose two rows are committed but still in the WAL of the returned
+    /// connection; keep it open while the store under test opens the file.
+    fn v2_store_in_wal(path: &Path, user_version: i64) -> Connection {
+        let writer = Connection::open(path).unwrap();
+        writer
+            .query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))
+            .unwrap();
+        writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        writer.execute_batch(V2_TABLE).unwrap();
+        writer
+            .pragma_update(None, "user_version", user_version)
+            .unwrap();
+        for (i, ip) in ["8.8.8.1", "8.8.8.2"].iter().enumerate() {
+            let i = i as i64 + 1;
+            writer
+                .execute(
+                    "INSERT INTO nodes (ip, port, routable, services, version, height, stats,
+                         last_ok, last_good, tried, consecutive_failures, next_try, last_harvest,
+                         first_seen, chain, chain_ref)
+                     VALUES (?1, 8080, 1, ?2, 70216, ?3, 'stats', 1, ?4, 1, ?2, ?5, ?6, ?7, 1, 'A')",
+                    params![ip, i, 1000 + i, 500 + i, 600 + i, 700 + i, 5 + i],
+                )
+                .unwrap();
+        }
+        let wal = with_suffix(path, "-wal");
+        assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+        writer
+    }
+
+    #[test]
+    fn v2_store_migrates_with_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        // Quotes in the path must not break the backup statement.
+        let sub = dir.path().join("it's \"here\"");
+        std::fs::create_dir(&sub).unwrap();
+        let path = sub.join("nodes.db");
+        let backup = sub.join("nodes.db.v2.bak");
+        let partial = sub.join("nodes.db.v2.bak.tmp");
+        // Leftovers from an earlier attempt are replaced, not fatal.
+        std::fs::write(&backup, b"stale").unwrap();
+        std::fs::write(&partial, b"stale").unwrap();
+
+        let writer = v2_store_in_wal(&path, 2);
+        let before = v2_rows(&writer);
+        assert_eq!(before.len(), 2);
+
+        let store = NodeStore::open(&path).unwrap();
+        assert_eq!(user_version(&store.conn()), 3);
+        assert_eq!(v2_rows(&store.conn()), before);
+        let agents: Vec<String> = store
+            .conn()
+            .prepare("SELECT user_agent FROM nodes")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(agents, ["", ""]);
+
+        let bak = Connection::open(&backup).unwrap();
+        assert_eq!(user_version(&bak), 2);
+        assert_eq!(v2_rows(&bak), before);
+        assert!(bak.prepare("SELECT user_agent FROM nodes").is_err());
+        assert!(!partial.exists());
+        drop(writer);
+    }
+
+    #[test]
+    fn reopening_a_v3_store_writes_no_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nodes.db");
+        let backup = dir.path().join("nodes.db.v2.bak");
+        drop(v2_store_in_wal(&path, 2));
+        drop(NodeStore::open(&path).unwrap());
+        std::fs::remove_file(&backup).unwrap();
+        drop(NodeStore::open(&path).unwrap());
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn unversioned_v2_table_migrates_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nodes.db");
+        let writer = v2_store_in_wal(&path, 0);
+        let store = NodeStore::open(&path).unwrap();
+        assert_eq!(user_version(&store.conn()), 3);
+        assert!(store.conn().prepare("SELECT user_agent FROM nodes").is_ok());
+        assert!(dir.path().join("nodes.db.v2.bak").exists());
+        drop(writer);
+    }
+
+    #[test]
+    fn new_store_is_created_at_version_3_without_a_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nodes.db");
+        let store = NodeStore::open(&path).unwrap();
+        assert_eq!(user_version(&store.conn()), 3);
+        assert!(store.conn().prepare("SELECT user_agent FROM nodes").is_ok());
+        drop(store);
+        drop(NodeStore::open(&path).unwrap());
+        assert!(!dir.path().join("nodes.db.v2.bak").exists());
+    }
+
+    #[test]
+    fn open_existing_refuses_a_v2_store_without_touching_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nodes.db");
+        let c = Connection::open(&path).unwrap();
+        c.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))
+            .unwrap();
+        c.execute_batch(V2_TABLE).unwrap();
+        c.pragma_update(None, "user_version", 2).unwrap();
+        drop(c);
+        let before = std::fs::read(&path).unwrap();
+
+        let err = NodeStore::open_existing(&path).err().unwrap().to_string();
+        assert!(err.contains("schema 2"), "{err}");
+        assert!(err.contains("seedcrystal run"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!dir.path().join("nodes.db.v2.bak").exists());
+        assert!(!dir.path().join("nodes.db.v2.bak.tmp").exists());
     }
 
     #[test]
@@ -1363,10 +1621,10 @@ mod tests {
 
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 3)
+            .pragma_update(None, "user_version", 4)
             .unwrap();
         let err = NodeStore::open_existing(&path).err().unwrap().to_string();
-        assert!(err.contains("schema 3"), "{err}");
+        assert!(err.contains("schema 4"), "{err}");
     }
 
     fn checked(chain: ChainCheck) -> Outcome {

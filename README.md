@@ -279,6 +279,17 @@ sudo -u seedcrystal seedcrystal seeds --config /etc/seedcrystal/seedcrystal.toml
   kept. A build refuses a database written by a newer one, so an accidental downgrade cannot
   damage it. Without the systemd unit, run `setcap` again after replacing the binary: the
   capability belongs to the file.
+- **Upgrading from 0.1.0.** The crawl database gains a column (schema 3). On its first start
+  the new build copies the database to `<preset id>.sqlite.v2.bak`, then changes it. Run
+  `seeds` only after that first start; before it, `seeds` refuses the old database and says so.
+  To go back to 0.1.0, which refuses a schema 3 database:
+  1. Stop the service.
+  2. Delete `<preset id>.sqlite-wal` and `<preset id>.sqlite-shm`. Restoring the old file next
+     to a leftover WAL would replay the new build's pages onto it.
+  3. Copy `<preset id>.sqlite.v2.bak` over `<preset id>.sqlite`.
+  4. Start the old binary.
+
+  This loses only the crawl state learned since the upgrade, which comes back within minutes.
 
 Files in `data_dir`, one set per network:
 
