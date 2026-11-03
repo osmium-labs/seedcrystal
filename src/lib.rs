@@ -9,6 +9,7 @@
 //! - [`dns`]: the authoritative DNS server, answer selection and the query log.
 //! - [`cloudflare`]: Cloudflare mode, publishing snapshots as DNS records.
 //! - [`doctor`]: checks a seed from the outside, the way a node resolves it.
+//! - [`jsonfile`]: atomic writes of the JSON files other processes read.
 //! - [`seeds`]: the fixed-seed list for a coin's `generate-seeds.py`.
 
 pub mod cloudflare;
@@ -17,6 +18,7 @@ pub mod config;
 pub mod crawler;
 pub mod dns;
 pub mod doctor;
+pub mod jsonfile;
 pub mod p2p;
 pub mod score;
 pub mod seeds;
