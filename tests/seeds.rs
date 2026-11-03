@@ -22,6 +22,7 @@ fn seed_good(store: &NodeStore, addr: &str) {
             height: 1000,
             harvested: false,
             chain: ChainCheck::NotChecked,
+            user_agent: String::new(),
         };
         store
             .record(addr, outcome, now - (2 - i) * 600, None)

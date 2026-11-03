@@ -8,6 +8,7 @@ use std::time::Duration;
 use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::rdata::{A, NS};
 use hickory_proto::rr::{Name, RData, RecordType};
+use seedcrystal::census::{self, AgentCount, Census, ProtocolCount};
 use seedcrystal::cloudflare::api::OWNER_COMMENT;
 use seedcrystal::coin::CoinPreset;
 use seedcrystal::config::{self, NetworkConfig};
@@ -113,6 +114,15 @@ impl Fixture {
         std::fs::write(self.log_path(), serde_json::to_string(&log).unwrap()).unwrap();
     }
 
+    fn census_path(&self) -> PathBuf {
+        census::path_for(&self.net.data_dir, &self.preset.id)
+    }
+
+    fn write_census(&self, c: &Census) {
+        std::fs::create_dir_all(&self.net.data_dir).unwrap();
+        std::fs::write(self.census_path(), serde_json::to_string(c).unwrap()).unwrap();
+    }
+
     fn options(&self, resolvers: &[&FakeResolver]) -> DoctorOptions {
         DoctorOptions {
             resolvers: resolvers.iter().map(|r| r.addr).collect(),
@@ -140,6 +150,100 @@ async fn healthy_resolver() -> FakeResolver {
         .answers(SEED, RecordType::AAAA, vec![])
         .answers(&format!("x1.{SEED}"), RecordType::AAAA, vec![]);
     r
+}
+
+/// A census built `age` seconds ago with these agents.
+fn census_of(age: u64, agents: &[(&str, u64)]) -> Census {
+    let nodes = agents.iter().map(|a| a.1).sum();
+    Census {
+        built_at: (now() - age) as i64,
+        window_s: 86_400,
+        min_protocol: 70215,
+        tip: 856_203,
+        nodes,
+        unverified: 0,
+        agents: agents
+            .iter()
+            .map(|&(a, n)| AgentCount {
+                user_agent: a.into(),
+                nodes: n,
+            })
+            .collect(),
+        protocol_versions: vec![ProtocolCount {
+            version: 70231,
+            nodes,
+        }],
+    }
+}
+
+/// Step 5 for an authoritative network whose data dir is set up by `prepare`.
+async fn census_step(prepare: impl FnOnce(&Fixture)) -> Check {
+    let (peer, _h) = peer_for(70231);
+    let fx = Fixture::authoritative(peer.port());
+    prepare(&fx);
+    let r = healthy_resolver().await;
+    let checks = run_checks(&fx.net, &fx.preset, &fx.options(&[&r])).await;
+    step(&checks, 5).clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn census_absent_skips_step_5() {
+    let s5 = census_step(|_| {}).await;
+    assert_eq!(s5.status, Status::Skip, "{s5:#?}");
+    assert!(s5.detail.contains("no census yet"), "{s5:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_census_fails_step_5() {
+    let s5 = census_step(|fx| fx.write_census(&census_of(301, &[("/a/", 1)]))).await;
+    assert_eq!(s5.status, Status::Fail, "{s5:#?}");
+    assert!(s5.detail.contains("is the seeder running?"), "{s5:#?}");
+    let fix = s5.fix.unwrap();
+    assert!(
+        fix.contains("seedcrystal") && fix.contains("journalctl"),
+        "{fix}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fresh_census_passes_step_5_with_a_summary() {
+    let s5 = census_step(|fx| {
+        fx.write_census(&census_of(
+            60,
+            &[
+                ("/Osmium Core:1.2.0/", 171),
+                ("/Osmium Core:1.1.9/", 6),
+                ("", 2),
+            ],
+        ))
+    })
+    .await;
+    assert_eq!(s5.status, Status::Pass, "{s5:#?}");
+    assert_eq!(
+        s5.detail,
+        "179 nodes in 24 h \u{b7} /Osmium Core:1.2.0/ 171 \u{b7} 2 more agents"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn census_with_hostile_text_or_nothing_in_it() {
+    let broken = census_step(|fx| {
+        std::fs::create_dir_all(&fx.net.data_dir).unwrap();
+        std::fs::write(fx.census_path(), "{").unwrap();
+    })
+    .await;
+    assert_eq!(broken.status, Status::Fail, "{broken:#?}");
+    assert!(broken.fix.unwrap().contains("remove the file"));
+
+    let hostile =
+        census_step(|fx| fx.write_census(&census_of(10, &[("/evil\u{1b}[2J/", 1)]))).await;
+    assert_eq!(hostile.status, Status::Pass, "{hostile:#?}");
+    assert!(hostile.detail.contains("/evil[2J/ 1"), "{hostile:#?}");
+    assert!(!hostile.detail.contains('\u{1b}'));
+
+    let empty = census_step(|fx| fx.write_census(&census_of(10, &[]))).await;
+    assert_eq!(empty.status, Status::Pass, "{empty:#?}");
+    assert_eq!(empty.detail, "0 nodes in 24 h");
 }
 
 fn now() -> u64 {
@@ -180,13 +284,14 @@ fn free_port() -> u16 {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn healthy_authoritative_seed_passes_steps_1_to_4() {
+async fn healthy_authoritative_seed_passes_steps_1_to_5() {
     let (peer, _h) = peer_for(70231);
     let fx = Fixture::authoritative(peer.port());
     fx.write_log(&format!("x1.{SEED}"), 3, now() - 60);
+    fx.write_census(&census_of(60, &[("/Osmium Core:1.2.0/", 1)]));
     let r = healthy_resolver().await;
     let checks = run_checks(&fx.net, &fx.preset, &fx.options(&[&r])).await;
-    for n in 1..=4 {
+    for n in 1..=5 {
         assert_eq!(step(&checks, n).status, Status::Pass, "{checks:#?}");
     }
     assert!(step(&checks, 3).detail.contains("127.0.0.1"));

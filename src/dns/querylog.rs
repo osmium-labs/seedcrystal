@@ -144,25 +144,6 @@ impl QueryLogs {
     }
 }
 
-/// Writes `log` to `path` through a temporary file in the same directory and a rename, so a
-/// reader sees the old file or the new one, never half of one.
-pub fn write_atomic(path: &Path, log: &QueryLog) -> Result<()> {
-    let file_name = path
-        .file_name()
-        .with_context(|| format!("query log path {} has no file name", path.display()))?;
-    let mut tmp_name = std::ffi::OsString::from(".");
-    tmp_name.push(file_name);
-    tmp_name.push(".tmp");
-    let tmp = path.with_file_name(tmp_name);
-    let result = std::fs::write(&tmp, serde_json::to_vec(log)?)
-        .and_then(|()| std::fs::rename(&tmp, path))
-        .with_context(|| format!("write query log {}", path.display()));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
-}
-
 /// Writes the counters every `interval` and once more when `shutdown` fires.
 pub fn spawn_writer(
     counters: Arc<Counters>,
@@ -172,7 +153,7 @@ pub fn spawn_writer(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let write = || {
-            if let Err(e) = write_atomic(&path, &counters.snapshot()) {
+            if let Err(e) = crate::jsonfile::write_atomic(&path, &counters.snapshot()) {
                 tracing::warn!("{e:#}");
             }
         };
@@ -250,56 +231,6 @@ mod tests {
         assert_eq!(log.names[OTHER].answered, 50);
         assert_eq!(log.names["xa0.seed.example"].answered, 2);
         assert_eq!(log.names.len(), MAX_NAMES + 2);
-    }
-
-    #[test]
-    fn file_written_atomically() {
-        let d = tempfile::tempdir().unwrap();
-        let path = path_for(d.path(), "osmium-mainnet");
-        std::fs::write(&path, "old").unwrap();
-        let c = Counters::new(5);
-        c.record("x1.seed.example", true, 9);
-        write_atomic(&path, &c.snapshot()).unwrap();
-        // The final path holds a complete document and no temporary file is left behind.
-        let log = read(&path).unwrap();
-        assert_eq!(log.since, 5);
-        assert_eq!(log.names["x1.seed.example"].answered, 1);
-        let files: Vec<_> = std::fs::read_dir(d.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        assert_eq!(files, ["queries-osmium-mainnet.json"]);
-
-        // A failed rename (the target is a directory) cleans up its temporary file and
-        // leaves the target alone.
-        let blocked = d.path().join("queries-blocked.json");
-        std::fs::create_dir(&blocked).unwrap();
-        assert!(write_atomic(&blocked, &c.snapshot()).is_err());
-        assert!(blocked.is_dir());
-        assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 2);
-    }
-
-    #[test]
-    fn a_write_that_cannot_create_its_temporary_file_leaves_the_old_log() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let d = tempfile::tempdir().unwrap();
-        let path = path_for(d.path(), "osmium-mainnet");
-        std::fs::write(&path, "old").unwrap();
-        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
-        // Root ignores directory permissions, so the scenario cannot be built.
-        let probe = d.path().join("probe");
-        let is_root = std::fs::write(&probe, "").is_ok();
-        if !is_root {
-            let c = Counters::new(5);
-            c.record("x1.seed.example", true, 9);
-            let result = write_atomic(&path, &c.snapshot());
-            let after = std::fs::read_to_string(&path);
-            std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-            assert!(result.is_err(), "an in-place write would have succeeded");
-            assert_eq!(after.unwrap(), "old");
-        }
-        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]

@@ -279,6 +279,17 @@ sudo -u seedcrystal seedcrystal seeds --config /etc/seedcrystal/seedcrystal.toml
   kept. A build refuses a database written by a newer one, so an accidental downgrade cannot
   damage it. Without the systemd unit, run `setcap` again after replacing the binary: the
   capability belongs to the file.
+- **Upgrading from 0.1.0.** The crawl database gains a column (schema 3). On its first start
+  the new build copies the database to `<preset id>.sqlite.v2.bak`, then changes it. Run
+  `seeds` only after that first start; before it, `seeds` refuses the old database and says so.
+  To go back to 0.1.0, which refuses a schema 3 database:
+  1. Stop the service.
+  2. Delete `<preset id>.sqlite-wal` and `<preset id>.sqlite-shm`. Restoring the old file next
+     to a leftover WAL would replay the new build's pages onto it.
+  3. Copy `<preset id>.sqlite.v2.bak` over `<preset id>.sqlite`.
+  4. Start the old binary.
+
+  This loses only the crawl state learned since the upgrade, which comes back within minutes.
 
 Files in `data_dir`, one set per network:
 
@@ -286,6 +297,7 @@ Files in `data_dir`, one set per network:
 |---|---|
 | `<preset id>.sqlite` | The crawl database: every known node, its score and its last check. |
 | `queries-<preset id>.json` | Authoritative mode: answered and empty A/AAAA queries per name, written every 60 s and at shutdown. `doctor` reads it. |
+| `census-<preset id>.json` | Both modes: what the network runs, by user agent and protocol version, rewritten every 60 s. `doctor` reads it. |
 | `shrink-guard-<preset id>.json` | Cloudflare mode: the last 24 hours of servable counts, so a restart during a crawl collapse keeps the guard's high-water mark. |
 
 The query log looks like
@@ -293,6 +305,27 @@ The query log looks like
 Its counters start over when the seeder restarts (`since` shows when), and names beyond 1024
 that resolvers invented are folded into one `_other` entry so they cannot crowd out the real
 ones.
+
+The census is a snapshot of the reachable network, overwritten each time; Seedcrystal keeps no
+history of it. It looks like
+
+```json
+{"built_at": <unix>, "window_s": 86400, "min_protocol": 70215, "tip": 856203,
+ "nodes": 179, "unverified": 4,
+ "agents": [{"user_agent": "/Osmium Core:1.2.0/", "nodes": 171}, {"user_agent": "", "nodes": 2}],
+ "protocol_versions": [{"version": 70231, "nodes": 179}]}
+```
+
+A node counts if it answered a handshake in the last `window_s` seconds, is a routable address
+on the preset's port, and is not on another chain. A node that failed its latest re-probe still
+counts, and so does one that lags behind: there is no height floor. `unverified` is how many of
+those nodes never had their chain checked against the preset's checkpoint. Peers below
+`min_protocol`, the preset's `min_peer_version`, are refused at the handshake and never counted.
+`agents` is sorted by node count; past 64 agents the rest are summed into `_other`, the last
+entry. An empty agent is a node that sent none or has not been probed since the upgrade.
+`protocol_versions` lists the highest version first, and both lists add up to `nodes`. User
+agents are text the peers chose: control characters are removed, but anything that displays
+them must still escape them.
 
 ## Checking a seed: `doctor`
 
@@ -321,9 +354,14 @@ in the detail but does not fail the check on its own.
    the day and hour of the latest sampled queries (UTC), and `~0 queries` for a silent one. If
    Cloudflare reports a GraphQL error alongside usable rows, the rows are used and the detail
    ends with `(Cloudflare also reported: <message>)`.
+5. **Network census.** Reads `census-<preset id>.json` (both modes) and summarises it: the node
+   count, the most common user agent and how many other agents there are. It fails when the
+   file is more than 5 minutes old, which means the seeder is not running or not writing it,
+   and is skipped when there is no file yet.
 
 Run `doctor` from the seeder's directory, or give `data_dir` as an absolute path: a relative one
-is resolved against the directory `doctor` runs in, and step 4 would not find the query log.
+is resolved against the directory `doctor` runs in, and steps 4 and 5 would not find the query
+log or the census.
 
 A healthy seed:
 
@@ -333,6 +371,7 @@ PASS  1  delegation — dnsseed.osmium.space is delegated to seed-ns.osmium.spac
 PASS  2  what a node resolves — x1.dnsseed.osmium.space and dnsseed.osmium.space resolve at 3 resolver(s), 12 distinct address(es)
 PASS  3  the answers are real nodes — 5 of 5 answered the handshake: ...
 PASS  4  real resolvers are asking — x1.dnsseed.osmium.space answered 41 time(s), last 3 min ago; the count includes your own dig and doctor runs
+PASS  5  network census — 179 nodes in 24 h · /Osmium Core:1.2.0/ 171 · 2 more agents
 ```
 
 A seeder that publishes the plain name but not the one nodes ask for:
