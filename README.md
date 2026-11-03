@@ -317,21 +317,23 @@ history of it. It looks like
 ```
 
 A node counts if it answered a handshake in the last `window_s` seconds, is a routable address
-on the preset's port, and is not on another chain. A node that failed its latest re-probe still
+on the preset's port (with `allow_private`, any address on any port, as for serving), and is
+not on another chain. A node that failed its latest re-probe still
 counts, and so does one that lags behind: there is no height floor. `unverified` is how many of
 those nodes never had their chain checked against the preset's checkpoint. Peers below
 `min_protocol`, the preset's `min_peer_version`, are refused at the handshake and never counted.
 `agents` is sorted by node count; past 64 agents the rest are summed into `_other`, the last
 entry. An empty agent is a node that sent none or has not been probed since the upgrade.
-`protocol_versions` lists the highest version first, and both lists add up to `nodes`. User
+`protocol_versions` lists the highest version first, one entry per version, so it has at most
+as many entries as there are counted nodes. Both lists add up to `nodes`. User
 agents are text the peers chose: control characters are removed, but anything that displays
 them must still escape them.
 
 ## Checking a seed: `doctor`
 
 `seedcrystal doctor --config <path> [--resolver ip[:port]]...` checks each configured seed from
-the outside, the way a coin node resolves it, and exits 1 if any check fails (a SKIP does not
-fail). It asks recursive resolvers (default 1.1.1.1, 8.8.8.8 and 9.9.9.9; repeat `--resolver`
+the outside, the way a coin node resolves it, then reads the seeder's census, and exits 1 if
+any check fails (a SKIP does not fail). It asks recursive resolvers (default 1.1.1.1, 8.8.8.8 and 9.9.9.9; repeat `--resolver`
 to choose your own), asking them to recurse, 3 s per query, retrying over TCP when the answer is truncated.
 A check passes only if every resolver that answered agrees; a resolver that times out is named
 in the detail but does not fail the check on its own.
@@ -357,7 +359,8 @@ in the detail but does not fail the check on its own.
 5. **Network census.** Reads `census-<preset id>.json` (both modes) and summarises it: the node
    count, the most common user agent and how many other agents there are. It fails when the
    file is more than 5 minutes old, which means the seeder is not running or not writing it,
-   and is skipped when there is no file yet.
+   and is skipped when there is no file yet, which is also the case when `doctor` runs on a
+host other than the seeder's.
 
 Run `doctor` from the seeder's directory, or give `data_dir` as an absolute path: a relative one
 is resolved against the directory `doctor` runs in, and steps 4 and 5 would not find the query

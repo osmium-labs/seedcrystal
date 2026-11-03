@@ -243,7 +243,10 @@ async fn census_is_written_at_start_from_the_store() {
                 .unwrap();
         }
         let path = dir.path().join("census.json");
-        std::fs::write(&path, r#"{"built_at":1}"#).unwrap();
+        // A complete census from an earlier run, so only a fresh write can satisfy the wait.
+        let old = census::build(&[], 1, 0, 0);
+        std::fs::write(&path, serde_json::to_string(&old).unwrap()).unwrap();
+        assert_eq!(census::read(&path).unwrap().built_at, 1);
         let mut cfg = config(&store_path, vec![]);
         cfg.census_path = Some(path.clone());
         cfg.census_interval = Duration::from_secs(3600);
