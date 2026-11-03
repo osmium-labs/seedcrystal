@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -14,6 +14,7 @@ use tokio::time::{MissedTickBehavior, interval, sleep, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::census;
 use crate::coin::{Checkpoint, CoinPreset};
 use crate::p2p::{AddrEntry, ChainCheck, NetAddr, ProbeOptions, probe};
 use crate::store::{Due, NodeStore, Outcome, Servable, ServablePolicy};
@@ -54,10 +55,15 @@ pub struct CrawlerConfig {
     pub bootstrap_retry: Duration,
     /// Optional dynamic bootstrap source, consulted on every attempt.
     pub bootstrap_source: Option<BootstrapSource>,
+    /// Where the census is written, if anywhere.
+    pub census_path: Option<PathBuf>,
+    /// Least time between two census writes.
+    pub census_interval: Duration,
 }
 
 impl CrawlerConfig {
-    /// Defaults: 64 concurrent probes, a snapshot every 30 s, public peers only.
+    /// Defaults: 64 concurrent probes, a snapshot every 30 s, public peers only, no census
+    /// file (written every 60 s once a path is set).
     pub fn new(preset: CoinPreset, store_path: PathBuf) -> Self {
         let probe = ProbeOptions {
             addr_wait: preset.addr_wait,
@@ -73,6 +79,8 @@ impl CrawlerConfig {
             probe,
             bootstrap_retry: Duration::from_secs(60),
             bootstrap_source: None,
+            census_path: None,
+            census_interval: Duration::from_secs(60),
         }
     }
 }
@@ -113,6 +121,9 @@ struct Shared {
     accept_port: Option<u16>,
     preset_id: String,
     checkpoint: Option<Checkpoint>,
+    census_path: Option<PathBuf>,
+    /// The preset's handshake floor, stated in the census.
+    min_protocol: i32,
     /// Checkpoint verdicts since the last snapshot.
     tally: Mutex<ChainTally>,
     /// When the wrong-checkpoint warning last fired.
@@ -215,6 +226,8 @@ pub fn spawn(
         policy,
         preset_id: cfg.preset.id.clone(),
         checkpoint: cfg.preset.checkpoint.clone(),
+        census_path: cfg.census_path.clone(),
+        min_protocol: cfg.preset.min_peer_version,
         tally: Mutex::default(),
         last_warning: Mutex::default(),
     });
@@ -256,6 +269,7 @@ async fn run(
     ));
     aux.spawn(snapshot_task(
         cfg.snapshot_interval,
+        cfg.census_interval,
         Arc::clone(&shared),
         tx,
         shutdown.clone(),
@@ -320,13 +334,46 @@ async fn bootstrap_task(
     }
 }
 
+fn write_census(
+    store: &NodeStore,
+    policy: &ServablePolicy,
+    min_protocol: i32,
+    path: &Path,
+    now: i64,
+) -> Result<()> {
+    let rows = store.census_rows(policy, now - census::WINDOW_S)?;
+    let tip = store.tip(policy, now)?;
+    crate::jsonfile::write_atomic(path, &census::build(&rows, now, tip, min_protocol))
+}
+
+/// Writes the census if a path is set; a failure is logged and the crawl goes on.
+async fn census_now(shared: &Shared) {
+    let Some(path) = shared.census_path.clone() else {
+        return;
+    };
+    let policy = shared.policy.clone();
+    let min_protocol = shared.min_protocol;
+    let now = unix_now();
+    let written = blocking(&shared.store, move |s| {
+        write_census(s, &policy, min_protocol, &path, now)
+    })
+    .await;
+    if let Err(e) = written {
+        warn!("census: {e:#}");
+    }
+}
+
 async fn snapshot_task(
     period: Duration,
+    census_every: Duration,
     shared: Arc<Shared>,
     tx: watch::Sender<Arc<Snapshot>>,
     shutdown: CancellationToken,
 ) {
     let period = period.max(Duration::from_millis(10));
+    // Right after the first snapshot, so a restart does not leave the last run's file.
+    census_now(&shared).await;
+    let mut census_at = tokio::time::Instant::now();
     loop {
         // A seeder with nothing to serve rebuilds quickly, so its first nodes appear soon.
         let wait = if tx.borrow().nodes.is_empty() {
@@ -351,6 +398,10 @@ async fn snapshot_task(
                 tx.send_replace(Arc::new(s));
             }
             Err(e) => warn!(error = %e, "snapshot rebuild failed"),
+        }
+        if census_at.elapsed() >= census_every {
+            census_now(&shared).await;
+            census_at = tokio::time::Instant::now();
         }
         let _ = shared.warn_on_wrong_checkpoint();
     }
@@ -500,6 +551,8 @@ mod tests {
             accept_port: None,
             preset_id: preset.id,
             checkpoint,
+            census_path: None,
+            min_protocol: 0,
             tally: Mutex::default(),
             last_warning: Mutex::default(),
         }

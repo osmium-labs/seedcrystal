@@ -137,6 +137,8 @@ allow_private = true
         "answer took {took:?}; the fake closes after getaddr, so this should be a few seconds"
     );
 
+    assert!(census_written(&dir.path().join("data")));
+
     // SIGTERM stops it cleanly with exit code 0.
     let pid = child.0.id().to_string();
     assert!(
@@ -163,6 +165,19 @@ allow_private = true
     .unwrap();
     let stats = &log.names["x1.dnsseed.osmium.space"];
     assert!(stats.answered >= 1, "{log:?}");
+}
+
+/// Whether the seeder wrote a parseable census for Osmium under `data_dir` within 10 s.
+fn census_written(data_dir: &std::path::Path) -> bool {
+    let path = seedcrystal::census::path_for(data_dir, "osmium-mainnet");
+    let end = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < end {
+        if seedcrystal::census::read(&path).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
 }
 
 fn run_to_exit(cfg: &std::path::Path, listen: &str) -> (std::process::ExitStatus, String) {
@@ -330,6 +345,8 @@ async fn run_publishes_to_fake_cloudflare() {
     // No DNS socket is bound in Cloudflare mode.
     UdpSocket::bind(("127.0.0.1", port)).expect("udp port must be free");
     std::net::TcpListener::bind(("127.0.0.1", port)).expect("tcp port must be free");
+
+    assert!(census_written(&dir.path().join("data")));
 
     let pid = child.0.id().to_string();
     assert!(

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use seedcrystal::census;
 use seedcrystal::cloudflare::api::normalize_name;
 use seedcrystal::cloudflare::{self, publish::PublishConfig};
 use seedcrystal::coin::{self, CoinPreset};
@@ -346,6 +347,7 @@ fn start_crawlers(
         let mut cc = CrawlerConfig::new(preset.clone(), store.clone());
         cc.bootstrap = n.bootstrap.clone();
         cc.allow_private = n.allow_private;
+        cc.census_path = Some(census::path_for(&n.data_dir, &preset.id));
         let (snapshot, handle) = crawler::spawn(cc, shutdown.clone())
             .with_context(|| format!("start crawler for `{}`", n.seed))?;
         crawlers.push((n.seed.clone(), handle));
