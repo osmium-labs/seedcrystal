@@ -83,6 +83,15 @@ pub struct Servable {
     pub services: u64,
 }
 
+/// One node counted by the census.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CensusRow {
+    pub user_agent: String,
+    pub version: i32,
+    /// Never verified against a checkpoint.
+    pub unverified: bool,
+}
+
 /// Collapse IPv4-mapped IPv6 (`::ffff:a.b.c.d`) to plain IPv4.
 fn normalise(ip: IpAddr) -> IpAddr {
     match ip {
@@ -561,6 +570,31 @@ impl NodeStore {
             heights.last()
         };
         Ok(tip.copied().unwrap_or(0))
+    }
+
+    /// The nodes the census counts: good at `since` or later, routable (unless the policy
+    /// allows private addresses), on the policy's port and not on another chain. A failed
+    /// re-probe since, a missing chain verdict and a low height do not exclude a node.
+    pub fn census_rows(&self, policy: &ServablePolicy, since: i64) -> Result<Vec<CensusRow>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT user_agent, version, chain FROM nodes
+             WHERE last_good > 0 AND last_good >= ?1
+               AND (routable = 1 OR ?2) AND (?3 IS NULL OR port = ?3)
+               AND chain != ?4
+             ORDER BY ip, port",
+        )?;
+        let rows = stmt.query_map(
+            params![since, policy.allow_private, policy.port, CHAIN_WRONG],
+            |r| {
+                Ok(CensusRow {
+                    user_agent: r.get(0)?,
+                    version: r.get(1)?,
+                    unverified: r.get::<_, i64>(2)? == 0,
+                })
+            },
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn servable(&self, policy: &ServablePolicy, now: i64) -> Result<Vec<Servable>> {
@@ -1512,6 +1546,127 @@ mod tests {
             .record(sa(a), good_agent("/Osmium Core:1.2.0/"), 400, None)
             .unwrap();
         assert_eq!(agent_of(&store, a), "/Osmium Core:1.2.0/");
+    }
+
+    /// The agents `census_rows` returns, sorted, with `*` marking an unverified row.
+    fn census_agents(store: &NodeStore, p: &ServablePolicy, since: i64) -> Vec<String> {
+        let mut got: Vec<String> = store
+            .census_rows(p, since)
+            .unwrap()
+            .into_iter()
+            .map(|r| {
+                assert_eq!(r.version, 70216);
+                format!("{}{}", r.user_agent, if r.unverified { "*" } else { "" })
+            })
+            .collect();
+        got.sort();
+        got
+    }
+
+    #[test]
+    fn census_counts_what_answered_in_the_window() {
+        let (_d, store) = open();
+        let t = 200_000;
+        let with = |agent: &str, chain: ChainCheck, height: i32| Outcome::Good {
+            version: 70216,
+            services: 1,
+            height,
+            harvested: false,
+            chain,
+            user_agent: agent.into(),
+        };
+        let rec = |addr: &str, o: Outcome, at: i64, r: Option<&str>| {
+            store.record(sa(addr), o, at, r).unwrap();
+        };
+        // Counted.
+        rec(
+            "8.8.8.1:8080",
+            with("/flap/", ChainCheck::Verified, 1000),
+            t - 100,
+            Some("A"),
+        );
+        rec("8.8.8.1:8080", Outcome::Bad, t - 50, Some("A"));
+        rec(
+            "8.8.8.2:8080",
+            with("/never/", ChainCheck::NotChecked, 1000),
+            t,
+            Some("A"),
+        );
+        rec(
+            "8.8.8.3:8080",
+            with("/verified/", ChainCheck::Verified, 1000),
+            t,
+            Some("A"),
+        );
+        rec(
+            "8.8.8.4:8080",
+            with("/low/", ChainCheck::Verified, 1),
+            t,
+            Some("A"),
+        );
+        // Left out.
+        rec(
+            "8.8.8.5:8080",
+            with("/old/", ChainCheck::Verified, 1000),
+            t - 86_401,
+            Some("A"),
+        );
+        rec(
+            "8.8.8.6:8080",
+            with("/fork/", ChainCheck::Verified, 1000),
+            t - 100,
+            Some("A"),
+        );
+        rec(
+            "8.8.8.6:8080",
+            Outcome::WrongChain { harvested: false },
+            t,
+            Some("A"),
+        );
+        rec(
+            "10.0.0.5:8080",
+            with("/private/", ChainCheck::Verified, 1000),
+            t,
+            Some("A"),
+        );
+        rec(
+            "8.8.8.9:9999",
+            with("/port/", ChainCheck::Verified, 1000),
+            t,
+            Some("A"),
+        );
+        rec("8.8.8.10:8080", Outcome::Bad, t, Some("A"));
+
+        let since = t - 86_400;
+        assert_eq!(
+            census_agents(&store, &policy(), since),
+            ["/flap/", "/low/", "/never/*", "/verified/"]
+        );
+        let any = ServablePolicy {
+            port: None,
+            allow_private: true,
+            ..policy()
+        };
+        assert_eq!(
+            census_agents(&store, &any, since),
+            [
+                "/flap/",
+                "/low/",
+                "/never/*",
+                "/port/",
+                "/private/",
+                "/verified/"
+            ]
+        );
+    }
+
+    #[test]
+    fn census_never_counts_a_node_that_was_never_good() {
+        let (_d, store) = open();
+        store
+            .record(sa("8.8.8.1:8080"), Outcome::Bad, 10, None)
+            .unwrap();
+        assert!(store.census_rows(&policy(), -5).unwrap().is_empty());
     }
 
     #[test]

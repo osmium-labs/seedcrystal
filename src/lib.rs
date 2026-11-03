@@ -9,9 +9,11 @@
 //! - [`dns`]: the authoritative DNS server, answer selection and the query log.
 //! - [`cloudflare`]: Cloudflare mode, publishing snapshots as DNS records.
 //! - [`doctor`]: checks a seed from the outside, the way a node resolves it.
+//! - [`census`]: what the crawled network runs, by user agent and protocol version.
 //! - [`jsonfile`]: atomic writes of the JSON files other processes read.
 //! - [`seeds`]: the fixed-seed list for a coin's `generate-seeds.py`.
 
+pub mod census;
 pub mod cloudflare;
 pub mod coin;
 pub mod config;
