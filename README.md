@@ -354,9 +354,14 @@ in the detail but does not fail the check on its own.
    the day and hour of the latest sampled queries (UTC), and `~0 queries` for a silent one. If
    Cloudflare reports a GraphQL error alongside usable rows, the rows are used and the detail
    ends with `(Cloudflare also reported: <message>)`.
+5. **Network census.** Reads `census-<preset id>.json` (both modes) and summarises it: the node
+   count, the most common user agent and how many other agents there are. It fails when the
+   file is more than 5 minutes old, which means the seeder is not running or not writing it,
+   and is skipped when there is no file yet.
 
 Run `doctor` from the seeder's directory, or give `data_dir` as an absolute path: a relative one
-is resolved against the directory `doctor` runs in, and step 4 would not find the query log.
+is resolved against the directory `doctor` runs in, and steps 4 and 5 would not find the query
+log or the census.
 
 A healthy seed:
 
@@ -366,6 +371,7 @@ PASS  1  delegation — dnsseed.osmium.space is delegated to seed-ns.osmium.spac
 PASS  2  what a node resolves — x1.dnsseed.osmium.space and dnsseed.osmium.space resolve at 3 resolver(s), 12 distinct address(es)
 PASS  3  the answers are real nodes — 5 of 5 answered the handshake: ...
 PASS  4  real resolvers are asking — x1.dnsseed.osmium.space answered 41 time(s), last 3 min ago; the count includes your own dig and doctor runs
+PASS  5  network census — 179 nodes in 24 h · /Osmium Core:1.2.0/ 171 · 2 more agents
 ```
 
 A seeder that publishes the plain name but not the one nodes ask for:
