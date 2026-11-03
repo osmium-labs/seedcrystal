@@ -191,6 +191,7 @@ async fn census_absent_skips_step_5() {
     let s5 = census_step(|_| {}).await;
     assert_eq!(s5.status, Status::Skip, "{s5:#?}");
     assert!(s5.detail.contains("no census yet"), "{s5:#?}");
+    assert!(s5.detail.contains("on the seeder's host"), "{s5:#?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -241,9 +242,26 @@ async fn census_with_hostile_text_or_nothing_in_it() {
     assert!(hostile.detail.contains("/evil[2J/ 1"), "{hostile:#?}");
     assert!(!hostile.detail.contains('\u{1b}'));
 
+    // Bidi and other format characters cannot reorder the line either.
+    let bidi =
+        census_step(|fx| fx.write_census(&census_of(10, &[("/x\u{202e}y\u{200b}/\u{2028}", 1)])))
+            .await;
+    assert!(bidi.detail.contains("/xy/ 1"), "{bidi:#?}");
+
     let empty = census_step(|fx| fx.write_census(&census_of(10, &[]))).await;
     assert_eq!(empty.status, Status::Pass, "{empty:#?}");
     assert_eq!(empty.detail, "0 nodes in 24 h");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn census_window_comes_from_the_file() {
+    let s5 = census_step(|fx| {
+        let mut c = census_of(10, &[("/a/", 3)]);
+        c.window_s = 3600;
+        fx.write_census(&c);
+    })
+    .await;
+    assert!(s5.detail.starts_with("3 nodes in 60 min \u{b7}"), "{s5:#?}");
 }
 
 fn now() -> u64 {

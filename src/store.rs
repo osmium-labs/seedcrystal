@@ -317,8 +317,8 @@ impl NodeStore {
             .with_context(|| format!("reading node store {}", path.display()))?;
         if version < SCHEMA_VERSION {
             anyhow::bail!(
-                "node store {} is schema {version}; start `seedcrystal run` with this build once \
-                 to migrate it (it keeps the old file as {}), then run `seeds`",
+                "node store {} is schema {version}; stop the service, start `seedcrystal run` with \
+                 this build once to migrate it (it keeps the old file as {}), then run `seeds`",
                 path.display(),
                 with_suffix(path, ".v2.bak").display()
             );
@@ -1495,6 +1495,7 @@ mod tests {
         let err = NodeStore::open_existing(&path).err().unwrap().to_string();
         assert!(err.contains("schema 2"), "{err}");
         assert!(err.contains("seedcrystal run"), "{err}");
+        assert!(err.contains("stop the service"), "{err}");
         assert_eq!(std::fs::read(&path).unwrap(), before);
         assert!(!dir.path().join("nodes.db.v2.bak").exists());
         assert!(!dir.path().join("nodes.db.v2.bak.tmp").exists());
@@ -1604,6 +1605,13 @@ mod tests {
             t,
             Some("A"),
         );
+        // Exactly at the start of the window.
+        rec(
+            "8.8.8.11:8080",
+            with("/edge/", ChainCheck::Verified, 1000),
+            t - 86_400,
+            Some("A"),
+        );
         // Left out.
         rec(
             "8.8.8.5:8080",
@@ -1640,7 +1648,7 @@ mod tests {
         let since = t - 86_400;
         assert_eq!(
             census_agents(&store, &policy(), since),
-            ["/flap/", "/low/", "/never/*", "/verified/"]
+            ["/edge/", "/flap/", "/low/", "/never/*", "/verified/"]
         );
         let any = ServablePolicy {
             port: None,
@@ -1650,6 +1658,7 @@ mod tests {
         assert_eq!(
             census_agents(&store, &any, since),
             [
+                "/edge/",
                 "/flap/",
                 "/low/",
                 "/never/*",

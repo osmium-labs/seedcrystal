@@ -966,7 +966,8 @@ fn census_step(net: &NetworkConfig, preset: &CoinPreset, now: u64) -> Check {
             NAME,
             Status::Skip,
             format!(
-                "no census yet at {}: the seeder writes it once a minute while it runs",
+                "no census yet at {}: the seeder writes it once a minute while it runs, on the \
+                 seeder's host",
                 path.display()
             ),
             None,
@@ -997,13 +998,17 @@ fn census_step(net: &NetworkConfig, preset: &CoinPreset, now: u64) -> Check {
             ),
         );
     }
-    let mut detail = format!("{} nodes in 24 h", c.nodes);
+    let window = u64::try_from(c.window_s).unwrap_or(0);
+    let mut detail = format!("{} nodes in {}", c.nodes, age(window));
     if let Some(top) = c.agents.first() {
-        detail.push_str(&format!(
-            " \u{b7} {} {}",
-            census::clean_agent(&top.user_agent),
-            top.nodes
-        ));
+        // Agents are ASCII by convention; anything else, bidi overrides included, could
+        // rearrange the printed line.
+        let agent: String = top
+            .user_agent
+            .chars()
+            .filter(|ch| ch.is_ascii_graphic() || *ch == ' ')
+            .collect();
+        detail.push_str(&format!(" \u{b7} {agent} {}", top.nodes));
     }
     if c.agents.len() > 1 {
         detail.push_str(&format!(" \u{b7} {} more agents", c.agents.len() - 1));
