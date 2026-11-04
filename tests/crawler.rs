@@ -206,6 +206,8 @@ async fn census_counts_crawled_agents() {
         assert_eq!(c.nodes, 1);
         assert_eq!(c.min_protocol, p.min_peer_version);
         assert_eq!(c.window_s, 86_400);
+        // The Osmium preset has no checkpoint, so no chain is ever checked.
+        assert_eq!(c.unverified, None);
         token.cancel();
         handle.await.unwrap().unwrap();
         let agent: String = rusqlite::Connection::open(&store)
@@ -244,7 +246,7 @@ async fn census_is_written_at_start_from_the_store() {
         }
         let path = dir.path().join("census.json");
         // A complete census from an earlier run, so only a fresh write can satisfy the wait.
-        let old = census::build(&[], 1, 0, 0);
+        let old = census::build(&[], 1, 0, 0, false);
         std::fs::write(&path, serde_json::to_string(&old).unwrap()).unwrap();
         assert_eq!(census::read(&path).unwrap().built_at, 1);
         let mut cfg = config(&store_path, vec![]);

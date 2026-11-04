@@ -343,7 +343,16 @@ fn write_census(
 ) -> Result<()> {
     let rows = store.census_rows(policy, now - census::WINDOW_S)?;
     let tip = store.tip(policy, now)?;
-    crate::jsonfile::write_atomic(path, &census::build(&rows, now, tip, min_protocol))
+    crate::jsonfile::write_atomic(
+        path,
+        &census::build(
+            &rows,
+            now,
+            tip,
+            min_protocol,
+            policy.checkpoint_ref.is_some(),
+        ),
+    )
 }
 
 /// Writes the census if a path is set; a failure is logged and the crawl goes on.

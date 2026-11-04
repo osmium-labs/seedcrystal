@@ -27,8 +27,9 @@ pub struct Census {
     /// The network tip, as served.
     pub tip: i32,
     pub nodes: u64,
-    /// Nodes among `nodes` whose chain was never verified against the checkpoint.
-    pub unverified: u64,
+    /// Nodes among `nodes` whose chain was never verified against the checkpoint; `None` when
+    /// the preset has no checkpoint, so no chain is ever checked.
+    pub unverified: Option<u64>,
     /// Most nodes first; [`OTHER`] last.
     pub agents: Vec<AgentCount>,
     /// Highest version first.
@@ -52,7 +53,14 @@ pub fn clean_agent(agent: &str) -> String {
     agent.chars().filter(|c| !c.is_control()).collect()
 }
 
-pub fn build(rows: &[CensusRow], built_at: i64, tip: i32, min_protocol: i32) -> Census {
+/// `chain_checked`: the preset has a checkpoint, so nodes' chains are checked against it.
+pub fn build(
+    rows: &[CensusRow],
+    built_at: i64,
+    tip: i32,
+    min_protocol: i32,
+    chain_checked: bool,
+) -> Census {
     let mut by_agent: HashMap<String, u64> = HashMap::new();
     let mut by_version: BTreeMap<i32, u64> = BTreeMap::new();
     // A peer calling itself `_other` joins the overflow row rather than making a second one.
@@ -87,7 +95,7 @@ pub fn build(rows: &[CensusRow], built_at: i64, tip: i32, min_protocol: i32) -> 
         min_protocol,
         tip,
         nodes: rows.len() as u64,
-        unverified: rows.iter().filter(|r| r.unverified).count() as u64,
+        unverified: chain_checked.then(|| rows.iter().filter(|r| r.unverified).count() as u64),
         agents,
         protocol_versions: by_version
             .into_iter()
@@ -138,7 +146,7 @@ mod tests {
     fn agents_sort_by_count_then_name_and_versions_descend() {
         let mut r = rows(&[("/b/", 2), ("/a/", 2), ("/c/", 5), ("", 1)]);
         r[0].version = 70215;
-        let c = build(&r, 1, 2, 3);
+        let c = build(&r, 1, 2, 3, true);
         assert_eq!(agents(&c), [("/c/", 5), ("/a/", 2), ("/b/", 2), ("", 1)]);
         assert_eq!(
             c.protocol_versions,
@@ -160,7 +168,7 @@ mod tests {
         let names: Vec<String> = (0..65).map(|i| format!("/n{i:02}/")).collect();
         let mut r: Vec<CensusRow> = names.iter().map(|n| row(n, 70231)).collect();
         r.extend(rows(&[("/big/", 3)]));
-        let c = build(&r, 1, 2, 3);
+        let c = build(&r, 1, 2, 3, true);
         assert_eq!(c.agents.len(), 65);
         assert_eq!(c.agents[0].user_agent, "/big/");
         // Ties sort by name, so the last two of /n00/../n64/ are folded.
@@ -177,7 +185,13 @@ mod tests {
 
     #[test]
     fn a_peer_named_other_folds_into_the_one_other_row() {
-        let c = build(&rows(&[("/a/", 3), ("_other", 2), ("/b/", 1)]), 1, 2, 3);
+        let c = build(
+            &rows(&[("/a/", 3), ("_other", 2), ("/b/", 1)]),
+            1,
+            2,
+            3,
+            true,
+        );
         assert_eq!(agents(&c), [("/a/", 3), ("/b/", 1), (OTHER, 2)]);
     }
 
@@ -188,6 +202,7 @@ mod tests {
             1,
             2,
             3,
+            true,
         );
         assert_eq!(agents(&c), [("/x:1/", 3)]);
     }
@@ -199,9 +214,9 @@ mod tests {
         r[5].unverified = true;
         r[2].version = 70220;
         r[6].version = 70215;
-        let c = build(&r, 1, 2, 3);
+        let c = build(&r, 1, 2, 3, true);
         assert_eq!(c.nodes, 9);
-        assert_eq!(c.unverified, 2);
+        assert_eq!(c.unverified, Some(2));
         assert_eq!(c.agents.iter().map(|a| a.nodes).sum::<u64>(), c.nodes);
         assert_eq!(
             c.protocol_versions.iter().map(|p| p.nodes).sum::<u64>(),
@@ -213,7 +228,7 @@ mod tests {
     fn json_shape_matches_the_spec() {
         let mut r = rows(&[("/Osmium Core:1.2.0/", 2), ("", 1)]);
         r[0].unverified = true;
-        let v = serde_json::to_value(build(&r, 1793714000, 856203, 70215)).unwrap();
+        let v = serde_json::to_value(build(&r, 1793714000, 856203, 70215, true)).unwrap();
         assert_eq!(
             v,
             serde_json::json!({
@@ -230,6 +245,22 @@ mod tests {
                 "protocol_versions": [{ "version": 70231, "nodes": 3 }]
             })
         );
+    }
+
+    #[test]
+    fn unverified_is_null_without_a_checkpoint() {
+        let mut r = rows(&[("/a/", 2)]);
+        r[0].unverified = true;
+        let c = build(&r, 1, 2, 3, false);
+        assert_eq!(c.unverified, None);
+        assert_eq!(c.nodes, 2);
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["unverified"], serde_json::Value::Null);
+        // The file reads back as written.
+        let d = tempfile::tempdir().unwrap();
+        let p = path_for(d.path(), "osmium-mainnet");
+        crate::jsonfile::write_atomic(&p, &c).unwrap();
+        assert_eq!(read(&p).unwrap(), c);
     }
 
     #[test]
