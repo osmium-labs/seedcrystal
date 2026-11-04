@@ -161,7 +161,7 @@ fn census_of(age: u64, agents: &[(&str, u64)]) -> Census {
         min_protocol: 70215,
         tip: 856_203,
         nodes,
-        unverified: 0,
+        unverified: None,
         agents: agents
             .iter()
             .map(|&(a, n)| AgentCount {

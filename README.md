@@ -320,7 +320,8 @@ A node counts if it answered a handshake in the last `window_s` seconds, is a ro
 on the preset's port (with `allow_private`, any address on any port, as for serving), and is
 not on another chain. A node that failed its latest re-probe still
 counts, and so does one that lags behind: there is no height floor. `unverified` is how many of
-those nodes never had their chain checked against the preset's checkpoint. Peers below
+those nodes never had their chain checked against the preset's checkpoint; it is `null` when
+the preset has no checkpoint, since then no chain is checked at all. Peers below
 `min_protocol`, the preset's `min_peer_version`, are refused at the handshake and never counted.
 `agents` is sorted by node count; past 64 agents the rest are summed into `_other`, the last
 entry. An empty agent is a node that sent none or has not been probed since the upgrade.
