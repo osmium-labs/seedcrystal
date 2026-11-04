@@ -1008,6 +1008,11 @@ fn census_step(net: &NetworkConfig, preset: &CoinPreset, now: u64) -> Check {
             .chars()
             .filter(|ch| ch.is_ascii_graphic() || *ch == ' ')
             .collect();
+        let agent = match agent.trim() {
+            "" if top.user_agent.is_empty() => "(no agent)",
+            "" => "(unprintable agent)",
+            a => a,
+        };
         detail.push_str(&format!(" \u{b7} {agent} {}", top.nodes));
     }
     if c.agents.len() > 1 {

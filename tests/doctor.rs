@@ -248,6 +248,16 @@ async fn census_with_hostile_text_or_nothing_in_it() {
             .await;
     assert!(bidi.detail.contains("/xy/ 1"), "{bidi:#?}");
 
+    // A node not re-probed since the upgrade has no agent yet; say so rather than print nothing.
+    let blank = census_step(|fx| fx.write_census(&census_of(10, &[("", 180)]))).await;
+    assert_eq!(blank.detail, "180 nodes in 24 h \u{b7} (no agent) 180");
+    let unprintable =
+        census_step(|fx| fx.write_census(&census_of(10, &[("\u{202e}\u{e9}", 2)]))).await;
+    assert_eq!(
+        unprintable.detail,
+        "2 nodes in 24 h \u{b7} (unprintable agent) 2"
+    );
+
     let empty = census_step(|fx| fx.write_census(&census_of(10, &[]))).await;
     assert_eq!(empty.status, Status::Pass, "{empty:#?}");
     assert_eq!(empty.detail, "0 nodes in 24 h");
