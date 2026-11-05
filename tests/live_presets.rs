@@ -386,6 +386,8 @@ fn reference_agents_cover_every_builtin_family() {
         "bitcoin-testnet4",
         "dash-mainnet",
         "dash-testnet",
+        "litecoin-mainnet",
+        "litecoin-testnet",
         "osmium-mainnet",
         "osmium-testnet",
         "raptoreum-mainnet",
