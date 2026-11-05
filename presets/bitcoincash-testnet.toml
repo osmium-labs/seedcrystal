@@ -1,0 +1,27 @@
+# Every value is cited from bitcoin-cash-node/bitcoin-cash-node@v29.2.0
+# (07576013c91ff4a3a74acd85f189c69121cdad1b).
+
+id = "bitcoincash-testnet"
+magic = "f4e5f3f4"            # src/chainparams.cpp:444-447 (netMagic, testnet3)
+default_port = 18333          # src/chainparams.cpp:448
+protocol_version = 70016      # src/version.h:11 (PROTOCOL_VERSION)
+min_peer_version = 31800      # src/version.h:17 (MIN_PEER_PROTO_VERSION), src/net_processing.cpp:2108
+version_trailer = "none"
+block_interval_secs = 600     # src/chainparams.cpp:363 (nPowTargetSpacing = 10 * 60)
+# src/version.h:47 (FEATURE_NEGOTIATION_BEFORE_VERACK_VERSION). src/net_processing.cpp:1885-1898
+# sends sendaddrv2 before verack from that version on, and :2393-2400 disconnects a peer that
+# sends it after verack.
+addrv2_min_version = 70016
+addrv2_placement = "before_verack"
+# The DNS name is x%x.<seed> (src/net.cpp:1658) with GetDesirableServiceFlags(NODE_NONE), which
+# returns NODE_NETWORK (src/protocol.cpp:184-190), and NODE_NETWORK = 1 (src/protocol.h:293), so
+# nodes query x1. Full nodes also set NODE_BITCOIN_CASH = 1 << 5 (src/protocol.h:313,
+# src/init.cpp:2012).
+seed_flags = 0x1
+filters = [0x1, 0x5, 0x21, 0x25]
+# eCash's testnet shares the magic and port, so only nodes proven on this chain are served.
+# src/chainparams.cpp:546: the newest testnet checkpointData entry, after the split at 1421481.
+checkpoint = { height = 1730264, hash = "000000000001ce982fa29717a4ed233b0e5a7a8b9936a17fdeeccc5c1d0af795" }
+# src/chainparams.cpp:467-471
+bootstrap_dns = ["testnet-seed.bchd.cash", "seed.tbch.loping.net", "testnet-seed.bitcoinunlimited.info"]
+bootstrap_fixed = []
