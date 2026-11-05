@@ -384,6 +384,8 @@ fn reference_agents_cover_every_builtin_family() {
     let ids = [
         "bitcoin-mainnet",
         "bitcoin-testnet4",
+        "bitcoincash-mainnet",
+        "bitcoincash-testnet",
         "dash-mainnet",
         "dash-testnet",
         "litecoin-mainnet",

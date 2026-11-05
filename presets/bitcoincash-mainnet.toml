@@ -1,0 +1,27 @@
+# Every value is cited from bitcoin-cash-node/bitcoin-cash-node@v29.2.0
+# (07576013c91ff4a3a74acd85f189c69121cdad1b).
+
+id = "bitcoincash-mainnet"
+magic = "e3e1f3e8"            # src/chainparams.cpp:190-193 (netMagic)
+default_port = 8333           # src/chainparams.cpp:194
+protocol_version = 70016      # src/version.h:11 (PROTOCOL_VERSION)
+min_peer_version = 31800      # src/version.h:17 (MIN_PEER_PROTO_VERSION), src/net_processing.cpp:2108
+version_trailer = "none"
+block_interval_secs = 600     # src/chainparams.cpp:101 (nPowTargetSpacing = 10 * 60)
+# src/version.h:47 (FEATURE_NEGOTIATION_BEFORE_VERACK_VERSION). src/net_processing.cpp:1885-1898
+# sends sendaddrv2 before verack from that version on, and :2393-2400 disconnects a peer that
+# sends it after verack.
+addrv2_min_version = 70016
+addrv2_placement = "before_verack"
+# The DNS name is x%x.<seed> (src/net.cpp:1658) with GetDesirableServiceFlags(NODE_NONE), which
+# returns NODE_NETWORK (src/protocol.cpp:184-190), and NODE_NETWORK = 1 (src/protocol.h:293), so
+# nodes query x1. Full nodes also set NODE_BITCOIN_CASH = 1 << 5 (src/protocol.h:313,
+# src/init.cpp:2012).
+seed_flags = 0x1
+filters = [0x1, 0x5, 0x21, 0x25]
+# eCash and BSV share the magic and port, so only nodes proven on this chain are served.
+# src/chainparams.cpp:323: the newest checkpointData entry, after the split at 661647.
+checkpoint = { height = 970892, hash = "000000000000000000e76270e57f4ebbd2b282db46a1695984935126c0a68cd8" }
+# src/chainparams.cpp:209-226
+bootstrap_dns = ["seed.flowee.cash", "seed-bch.bitcoinforks.org", "btccash-seeder.bitcoinunlimited.info", "seed.bchd.cash", "seed.bch.loping.net", "bchseed.c3-soft.com", "bch.bitjson.com"]
+bootstrap_fixed = []
