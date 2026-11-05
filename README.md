@@ -84,6 +84,8 @@ There are two ways to publish the snapshot. Pick one per seed name:
 | `dash-testnet` | Dash | testnet | 19999 | live crawl (2026-11-05) |
 | `dogecoin-mainnet` | Dogecoin | mainnet | 22556 | live crawl (2026-11-05) |
 | `dogecoin-testnet` | Dogecoin | testnet | 44556 | live crawl (2026-11-05) |
+| `ecash-mainnet` | eCash | mainnet | 8333 | live crawl (2026-11-05) |
+| `ecash-testnet` | eCash | testnet | 18333 | live crawl (2026-11-05) |
 | `litecoin-mainnet` | Litecoin | mainnet | 9333 | live crawl (2026-11-05) |
 | `litecoin-testnet` | Litecoin | testnet | 19335 | live crawl (2026-11-05) |
 | `osmium-mainnet` | Osmium | mainnet | 9969 | end-to-end (2026-10-25) |
