@@ -82,6 +82,8 @@ There are two ways to publish the snapshot. Pick one per seed name:
 | `bitcoin-testnet4` | Bitcoin | testnet4 | 48333 | offline (2026-10-26) |
 | `dash-mainnet` | Dash | mainnet | 9999 | live crawl (2026-11-05) |
 | `dash-testnet` | Dash | testnet | 19999 | live crawl (2026-11-05) |
+| `dogecoin-mainnet` | Dogecoin | mainnet | 22556 | live crawl (2026-11-05) |
+| `dogecoin-testnet` | Dogecoin | testnet | 44556 | live crawl (2026-11-05) |
 | `litecoin-mainnet` | Litecoin | mainnet | 9333 | live crawl (2026-11-05) |
 | `litecoin-testnet` | Litecoin | testnet | 19335 | live crawl (2026-11-05) |
 | `osmium-mainnet` | Osmium | mainnet | 9969 | end-to-end (2026-10-25) |
@@ -97,6 +99,9 @@ There are two ways to publish the snapshot. Pick one per seed name:
   network for ten minutes and served nodes running the coin's own client;
 - **handshake**: handshakes only, for a testnet with too few nodes to crawl;
 - **offline**: unit tests and the citations; not yet run against the coin's nodes.
+
+Dogecoin nodes query the seed's plain name, not an `x<hex>` name. Their presets set `seed_flags`
+to the services those nodes require of a peer, so the plain name serves exactly those nodes.
 
 `seedcrystal presets` lists them with their port, seed name prefix and protocol version.
 Another coin needs only a preset file; see [Adding a coin](#adding-a-coin-preset-reference).
