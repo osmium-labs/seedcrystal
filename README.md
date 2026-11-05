@@ -91,8 +91,8 @@ There are two ways to publish the snapshot. Pick one per seed name:
 
 "Tested" says how far a preset has been checked against the coin's real nodes:
 
-- **end-to-end**: a stock node with an empty data directory takes its first peers from
-  Seedcrystal (the release gate, and the live Osmium seed);
+- **end-to-end**: a stock node of the coin, started with an empty data directory, takes its
+  first peers from Seedcrystal;
 - **live crawl**: Seedcrystal completed handshakes with the coin's nodes, then crawled its
   network for ten minutes and served nodes running the coin's own client;
 - **handshake**: handshakes only, for a testnet with too few nodes to crawl;
