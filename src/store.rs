@@ -542,10 +542,14 @@ impl NodeStore {
 
     /// Network tip as seen by this store, from nodes that pass every non-height servable check
     /// (a verified chain among them, when a checkpoint is set) and were good within 2 h. Each
-    /// network group (see [`netgroup`]) votes once, with its nodes' median height, and the tip
-    /// is the highest height that a third of the groups reach, but at least three of them (all
-    /// of them below three; 0 if none). Moving the tip therefore takes nodes in a third of the
-    /// network's groups, not a few nodes reporting a false height.
+    /// network group (see [`netgroup`]) votes once, with its nodes' lower median height, and the
+    /// tip is the highest height that a third of the groups reach, but at least three of them
+    /// (all of them below three; 0 if none).
+    ///
+    /// Raising the tip therefore takes nodes in a third of the network's groups, at least
+    /// three, not a few nodes reporting a false height. A host with both an IPv4 and an IPv6
+    /// address votes in two groups. With three groups or fewer, one lagging group sets the tip:
+    /// a laggard can lower it, a liar cannot raise it.
     pub fn tip(&self, policy: &ServablePolicy, now: i64) -> Result<i32> {
         let conn = self.conn();
         let mut stmt = conn.prepare_cached(
@@ -579,7 +583,7 @@ impl NodeStore {
             .into_values()
             .map(|mut heights| {
                 heights.sort_unstable();
-                heights[heights.len() / 2]
+                heights[(heights.len() - 1) / 2]
             })
             .collect();
         votes.sort_unstable_by(|a, b| b.cmp(a));
@@ -1020,16 +1024,31 @@ mod tests {
     }
 
     #[test]
-    fn tip_rule_is_unchanged_below_three_nodes() {
+    fn two_groups_take_the_lower_vote() {
+        // Below three groups every group must reach the tip: a laggard can lower it, a liar
+        // cannot raise it.
         let (_d, store) = open();
         store
-            .record(sa("8.8.8.1:8080"), good(1000), 100, None)
+            .record(sa("8.1.0.1:8080"), good(1000), 100, None)
             .unwrap();
         store
-            .record(sa("8.8.8.2:8080"), good(0), 100, None)
+            .record(sa("8.2.0.1:8080"), good(990), 100, None)
+            .unwrap();
+        assert_eq!(store.tip(&policy(), 110).unwrap(), 990);
+        assert_eq!(addrs(&store, &policy(), 110).len(), 2);
+    }
+
+    #[test]
+    fn a_two_node_group_votes_its_lower_height() {
+        let (_d, store) = open();
+        store
+            .record(sa("7.7.0.1:8080"), good(1000), 100, None)
+            .unwrap();
+        store
+            .record(sa("7.7.0.2:8080"), good(6000), 100, None)
             .unwrap();
         assert_eq!(store.tip(&policy(), 110).unwrap(), 1000);
-        assert_eq!(addrs(&store, &policy(), 110), vec![sa("8.8.8.1:8080")]);
+        assert_eq!(addrs(&store, &policy(), 110), vec![sa("7.7.0.1:8080")]);
     }
 
     #[test]
@@ -1100,15 +1119,17 @@ mod tests {
         let p = policy();
         assert_eq!(store.tip(&p, 0).unwrap(), 0);
         store
-            .record(sa("8.8.8.1:8080"), good(500), 0, None)
+            .record(sa("8.1.0.1:8080"), good(500), 0, None)
             .unwrap();
         store
-            .record(sa("8.8.8.2:8080"), good(900), 5000, None)
+            .record(sa("8.2.0.1:8080"), good(900), 5000, None)
             .unwrap();
-        // Two qualifying nodes: the tip is the maximum.
-        assert_eq!(store.tip(&p, 5000).unwrap(), 900);
+        // Two qualifying groups: the tip is the lower vote.
+        assert_eq!(store.tip(&p, 5000).unwrap(), 500);
+        assert_eq!(store.tip(&p, 7200).unwrap(), 500);
+        // The older node leaves the window; the newer one alone sets the tip.
+        assert_eq!(store.tip(&p, 7201).unwrap(), 900);
         assert_eq!(store.tip(&p, 7200 + 5001).unwrap(), 0);
-        assert_eq!(store.tip(&p, 7200).unwrap(), 900);
     }
 
     #[test]
@@ -1173,14 +1194,14 @@ mod tests {
         for i in 0..3 {
             store
                 .record(
-                    sa(&format!("8.8.8.{}:8080", i + 1)),
+                    sa(&format!("8.{}.0.1:8080", i + 1)),
                     good(1000),
                     t - 3700,
                     None,
                 )
                 .unwrap();
             store
-                .record(sa(&format!("8.8.9.{}:8080", i + 1)), good(900), t, None)
+                .record(sa(&format!("8.{}.0.1:8080", i + 11)), good(900), t, None)
                 .unwrap();
         }
         // The older nodes are 3700 s old: inside the 7200 s window.
