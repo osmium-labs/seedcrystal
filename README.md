@@ -116,9 +116,20 @@ Another coin needs only a preset file; see [Adding a coin](#adding-a-coin-preset
 
 ## Install
 
-Seedcrystal is built from source and runs on Linux. You need `git`, a C compiler (the
-`build-essential` or `gcc` package; SQLite is compiled in) and Rust from
-[rustup](https://rustup.rs). The exact Rust toolchain is pinned in `rust-toolchain.toml` and
+Seedcrystal runs on Linux and is built with Rust from [rustup](https://rustup.rs). You also
+need a C compiler (the `build-essential` or `gcc` package; SQLite is compiled in).
+
+From [crates.io](https://crates.io/crates/seedcrystal):
+
+```sh
+cargo install seedcrystal --locked
+sudo install -m 755 ~/.cargo/bin/seedcrystal /usr/local/bin/seedcrystal
+```
+
+`--locked` builds with the dependency versions the release was tested with. `cargo install`
+uses your default Rust toolchain; if the build fails, update it with `rustup update stable`.
+
+From source, with `git`. The exact Rust toolchain is pinned in `rust-toolchain.toml` and
 fetched automatically on the first build.
 
 ```sh
@@ -128,7 +139,8 @@ cargo build --release
 sudo install -m 755 target/release/seedcrystal /usr/local/bin/seedcrystal
 ```
 
-The binary is all you need. To run it as a service, see
+Either way, the `sudo install` line puts the binary where the systemd unit expects it. The binary
+is all you need. To run it as a service, see
 [Running it in production](#running-it-in-production).
 
 ## Quickstart: your own nameserver
