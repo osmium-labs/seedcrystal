@@ -79,8 +79,8 @@ There are two ways to publish the snapshot. Pick one per seed name:
 
 | Preset | Coin | Network | P2P port | Tested |
 |---|---|---|---|---|
-| `bitcoin-mainnet` | Bitcoin | mainnet | 8333 | offline (2026-10-26) |
-| `bitcoin-testnet4` | Bitcoin | testnet4 | 48333 | offline (2026-10-26) |
+| `bitcoin-mainnet` | Bitcoin | mainnet | 8333 | live crawl (2026-11-05) |
+| `bitcoin-testnet4` | Bitcoin | testnet4 | 48333 | live crawl (2026-11-05) |
 | `bitcoincash-mainnet` | Bitcoin Cash | mainnet | 8333 | live crawl (2026-11-05) |
 | `bitcoincash-testnet` | Bitcoin Cash | testnet | 18333 | live crawl (2026-11-05) |
 | `dash-mainnet` | Dash | mainnet | 9999 | live crawl (2026-11-05) |
