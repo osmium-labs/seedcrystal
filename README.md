@@ -82,6 +82,8 @@ There are two ways to publish the snapshot. Pick one per seed name:
 | `bitcoin-testnet4` | Bitcoin | testnet4 | 48333 | offline |
 | `dash-mainnet` | Dash | mainnet | 9999 | live crawl (2026-11-05) |
 | `dash-testnet` | Dash | testnet | 19999 | live crawl (2026-11-05) |
+| `litecoin-mainnet` | Litecoin | mainnet | 9333 | live crawl (2026-11-05) |
+| `litecoin-testnet` | Litecoin | testnet | 19335 | live crawl (2026-11-05) |
 | `osmium-mainnet` | Osmium | mainnet | 9969 | end-to-end |
 | `osmium-testnet` | Osmium | testnet | 19969 | end-to-end |
 | `raptoreum-mainnet` | Raptoreum | mainnet | 10226 | offline |
