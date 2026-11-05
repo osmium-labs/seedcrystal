@@ -396,6 +396,7 @@ fn reference_agents_cover_every_builtin_family() {
         "ecash-testnet",
         "osmium-mainnet",
         "osmium-testnet",
+        "pivx-mainnet",
         "raptoreum-mainnet",
         "raptoreum-testnet",
     ];
