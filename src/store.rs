@@ -617,10 +617,14 @@ impl NodeStore {
         let floor_version = serve_floor(policy.serve_floor_base, &policy.schedule, tip);
         let floor_height =
             (i64::from(tip) - i64::from(policy.tip_tolerance)).max(i64::from(policy.min_height));
+        // A node further ahead than the tolerance is lying or on another chain. With no tip
+        // (nothing recent enough to vote) there is nothing to be ahead of.
+        let ceiling_height = (tip > 0).then(|| i64::from(tip) + i64::from(policy.tip_tolerance));
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT ip, port, services, stats, last_good FROM nodes
              WHERE last_ok = 1 AND version >= ?1 AND height >= ?2
+               AND (?6 IS NULL OR height <= ?6)
                AND (routable = 1 OR ?3) AND (?4 IS NULL OR port = ?4)
                AND (?5 IS NULL OR (chain = 1 AND chain_ref = ?5))
              ORDER BY ip, port",
@@ -631,7 +635,8 @@ impl NodeStore {
                 floor_height,
                 policy.allow_private,
                 policy.port,
-                policy.checkpoint_ref
+                policy.checkpoint_ref,
+                ceiling_height
             ],
             |r| {
                 Ok((
@@ -934,6 +939,45 @@ mod tests {
     }
 
     #[test]
+    fn nodes_far_above_the_tip_are_not_served() {
+        // bitcoin-mainnet, 2026-11-05: once the tip was right, eight nodes ~5,900 blocks ahead
+        // were still served next to the honest ones.
+        let (_d, store) = open();
+        let t = 100;
+        nodes_in_groups(&store, 0, 30, 1000, t);
+        nodes_in_groups(&store, 100, 7, 6000, t);
+        let served = addrs(&store, &policy(), t + 10);
+        assert_eq!(served.len(), 30);
+        assert!(!served.contains(&sa("9.100.0.1:8080")));
+    }
+
+    #[test]
+    fn a_node_up_to_the_tolerance_above_the_tip_is_served() {
+        let (_d, store) = open();
+        let t = 100;
+        nodes_in_groups(&store, 0, 5, 1000, t);
+        // tolerance is 100 in policy()
+        nodes_in_groups(&store, 50, 1, 1100, t);
+        nodes_in_groups(&store, 60, 1, 1101, t);
+        let served = addrs(&store, &policy(), t + 10);
+        assert!(served.contains(&sa("9.50.0.1:8080")));
+        assert!(!served.contains(&sa("9.60.0.1:8080")));
+    }
+
+    #[test]
+    fn without_a_tip_no_height_is_too_high() {
+        let (_d, store) = open();
+        let t = 50_000;
+        for i in 1..=10 {
+            make_full_bar(&store, sa(&format!("9.{i}.0.1:8080")), t);
+        }
+        // Long after the last probe no node is recent enough to vote: the tip is unknown.
+        let later = t + 1200 + TIP_WINDOW + 1;
+        assert_eq!(store.tip(&policy(), later).unwrap(), 0);
+        assert_eq!(addrs(&store, &policy(), later).len(), 10);
+    }
+
+    #[test]
     fn many_liars_in_one_group_count_once() {
         let (_d, store) = open();
         let t = 100;
@@ -1182,7 +1226,7 @@ mod tests {
     }
 
     #[test]
-    fn one_lying_height_does_not_unserve_honest_nodes() {
+    fn one_lying_height_unserves_neither_honest_nodes_nor_is_served() {
         let (_d, store) = open();
         let t = 100;
         for i in 1..=5 {
@@ -1194,12 +1238,11 @@ mod tests {
             .record(sa("8.8.4.4:8080"), good(10_000_000), t, None)
             .unwrap();
         let got = store.servable(&policy(), t + 10).unwrap();
-        assert_eq!(got.len(), 6);
-        let honest = got
-            .iter()
-            .filter(|s| s.addr.ip().to_string().starts_with("8.8.8."))
-            .count();
-        assert_eq!(honest, 5);
+        assert_eq!(got.len(), 5);
+        assert!(
+            got.iter()
+                .all(|s| s.addr.ip().to_string().starts_with("8.8.8."))
+        );
     }
 
     #[test]

@@ -58,9 +58,9 @@ hard-coded addresses. Seedcrystal is built to get this right the first time:
 2. **Score.** Every check updates the node's reliability over five windows (2 hours to a month).
    A node *meets the full bar* when any one window shows a high enough success rate over enough
    checks; three successful checks ten minutes apart are enough. To be *servable* it must also
-   run a recent enough protocol version, be no more than `tip_tolerance` blocks behind the
-   network's tip (about two hours of blocks), and, if the preset sets a checkpoint, be on that
-   chain.
+   run a recent enough protocol version, be within `tip_tolerance` blocks of the network's tip
+   (about two hours of blocks; further ahead means a false height or another chain), and, if the
+   preset sets a checkpoint, be on that chain.
 3. **Serve.** Every 30 seconds the servable nodes are collected into a snapshot, which is what
    DNS answers come from, up to 20 addresses per answer. While fewer than 10 nodes meet the full
    bar (on a fresh install, for example), *warm-up* nodes are served too: nodes that completed a
@@ -530,7 +530,7 @@ serve_version_schedule = [{ height = 420420, version = 70219 }]
 | `addrv2_placement` | `"before_verack"` | `"after_verack"` sends `sendaddrv2` right after our `verack`, for nodes that expect it there. |
 | `checksum` | `"sha256d"` | P2P header checksum; `"groestl512d"` is double Groestl-512. |
 | `block_interval_secs` | required | The effective block spacing in seconds, > 0. |
-| `tip_tolerance` | `max(6, ceil(7200 / block_interval_secs))` | Blocks a node may trail the network's tip and still be served (two hours of blocks). |
+| `tip_tolerance` | `max(6, ceil(7200 / block_interval_secs))` | Blocks a node may trail, or lead, the network's tip and still be served (two hours of blocks). |
 | `min_serve_version` | `min_peer_version` | Lowest version that is served; must be at least `min_peer_version`. Older peers are still crawled but not served. |
 | `serve_version_schedule` | empty | List of `{ height, version }`. The floor at tip height `h` is the highest of `min_serve_version` and every entry with `height <= h`. Heights strictly ascending, versions non-decreasing. |
 | `min_height` | `0` | Nodes below this height are never served. |
