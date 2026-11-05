@@ -388,6 +388,8 @@ fn reference_agents_cover_every_builtin_family() {
         "dash-testnet",
         "litecoin-mainnet",
         "litecoin-testnet",
+        "dogecoin-mainnet",
+        "dogecoin-testnet",
         "osmium-mainnet",
         "osmium-testnet",
         "raptoreum-mainnet",
