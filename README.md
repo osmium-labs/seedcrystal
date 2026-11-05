@@ -2,7 +2,9 @@
 
 **A multi-coin DNS seeder for Bitcoin-protocol UTXO chains.** Seedcrystal crawls your coin's
 P2P network, keeps score of which nodes are reliable and on the right chain, and hands the good
-ones to new nodes over DNS, from its own authoritative server or through Cloudflare.
+ones to new nodes over DNS, from its own authoritative server or through Cloudflare. It fills
+the role of a coin's *DNS seed*, the job [bitcoin-seeder](https://github.com/sipa/bitcoin-seeder)
+(`dnsseed`) does for Bitcoin, for any coin with a preset.
 
 [![CI](https://github.com/osmium-labs/seedcrystal/actions/workflows/ci.yml/badge.svg)](https://github.com/osmium-labs/seedcrystal/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
