@@ -124,7 +124,7 @@ struct Shared {
     census_path: Option<PathBuf>,
     /// The preset's handshake floor, stated in the census.
     min_protocol: i32,
-    /// Checkpoint verdicts since the last snapshot.
+    /// Checkpoint verdicts since the crawler started.
     tally: Mutex<ChainTally>,
     /// When the wrong-checkpoint warning last fired.
     last_warning: Mutex<Option<std::time::Instant>>,
@@ -132,8 +132,8 @@ struct Shared {
 
 #[derive(Default)]
 struct ChainTally {
-    verified: u32,
-    wrong: u32,
+    verified: u64,
+    wrong: u64,
 }
 
 impl Shared {
@@ -147,15 +147,17 @@ impl Shared {
     }
 
     /// A mistyped checkpoint makes every node wrong chain and empties the seed, so say so
-    /// when wrong chain is the majority of this interval's verdicts, at most once per
-    /// [`WRONG_CHECKPOINT_WARN_EVERY`]: an empty seed rebuilds every 2 s. Returns whether it
-    /// warned.
+    /// when wrong chain is the majority of the run's verdicts, at most once per
+    /// [`WRONG_CHECKPOINT_WARN_EVERY`]: an empty seed rebuilds every 2 s. The whole run is
+    /// judged, not one interval, because a chain sharing its magic and port with others meets
+    /// their nodes all the time, and a quiet interval can hold more of them than of its own.
+    /// Returns whether it warned.
     fn warn_on_wrong_checkpoint(&self) -> bool {
-        let t = std::mem::take(&mut *self.tally.lock().unwrap_or_else(|e| e.into_inner()));
         let Some(c) = &self.checkpoint else {
             return false;
         };
-        if t.wrong >= 1 && t.wrong > t.verified {
+        let t = self.tally.lock().unwrap_or_else(|e| e.into_inner());
+        if t.wrong + t.verified >= MIN_CHECKPOINT_VERDICTS && t.wrong > t.verified {
             let mut last = self.last_warning.lock().unwrap_or_else(|e| e.into_inner());
             if last.is_some_and(|at| at.elapsed() < WRONG_CHECKPOINT_WARN_EVERY) {
                 return false;
@@ -164,7 +166,7 @@ impl Shared {
             warn!(
                 checkpoint_height = c.height,
                 checkpoint_hash = %c.display_hash(),
-                "{}: {} of {} checked nodes are on the wrong chain; is the preset checkpoint right?",
+                "{}: {} of {} checkpoint checks so far found the wrong chain; is the preset checkpoint right?",
                 self.preset_id,
                 t.wrong,
                 t.wrong + t.verified
@@ -237,6 +239,9 @@ pub fn spawn(
 
 /// Rebuild period while the published snapshot is empty.
 const EMPTY_SNAPSHOT_PERIOD: Duration = Duration::from_secs(2);
+
+/// Verdicts needed before the wrong-checkpoint warning judges them.
+const MIN_CHECKPOINT_VERDICTS: u64 = 3;
 
 /// Least time between two wrong-checkpoint warnings.
 const WRONG_CHECKPOINT_WARN_EVERY: Duration = Duration::from_secs(10 * 60);
@@ -589,6 +594,34 @@ mod tests {
         *s.last_warning.lock().unwrap() =
             Some(std::time::Instant::now() - WRONG_CHECKPOINT_WARN_EVERY);
         s.count(ChainCheck::WrongChain);
+        assert!(s.warn_on_wrong_checkpoint());
+    }
+
+    #[test]
+    fn a_wrong_majority_in_one_interval_is_judged_against_the_whole_run() {
+        // bitcoincash-mainnet, 2026-11-05: 138 verified against 6 wrong over ten minutes, but
+        // one quiet interval held 2 wrong of 3 (eCash and BSV share the magic and port).
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path(), Some(CP));
+        for _ in 0..138 {
+            s.count(ChainCheck::Verified);
+        }
+        assert!(!s.warn_on_wrong_checkpoint());
+        s.count(ChainCheck::WrongChain);
+        s.count(ChainCheck::WrongChain);
+        s.count(ChainCheck::Verified);
+        assert!(!s.warn_on_wrong_checkpoint());
+    }
+
+    #[test]
+    fn too_few_verdicts_are_not_judged() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path(), Some(CP));
+        s.count(ChainCheck::WrongChain);
+        assert!(!s.warn_on_wrong_checkpoint());
+        s.count(ChainCheck::WrongChain);
+        assert!(!s.warn_on_wrong_checkpoint());
+        s.count(ChainCheck::Verified);
         assert!(s.warn_on_wrong_checkpoint());
     }
 
