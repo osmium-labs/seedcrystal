@@ -1,0 +1,24 @@
+# Every value is cited from litecoin-project/litecoin@v0.21.5.8
+# (ec1b6489a900d09cf5991e220dce089c77a232a2).
+
+id = "litecoin-testnet"
+magic = "fdd2c8f1"            # src/chainparams.cpp:236-239
+default_port = 19335          # src/chainparams.cpp:240
+protocol_version = 70017      # src/version.h:12 (PROTOCOL_VERSION)
+min_peer_version = 31800      # src/version.h:18 (MIN_PEER_PROTO_VERSION), src/net_processing.cpp:2707
+version_trailer = "none"
+block_interval_secs = 150     # src/chainparams.cpp:212 (nPowTargetSpacing = 2.5 * 60)
+# src/net_processing.cpp:2755-2761: sendaddrv2 is sent between version and verack to peers at
+# 70016 or later; :2946-2951: one received after verack disconnects.
+addrv2_min_version = 70016
+addrv2_placement = "before_verack"
+# The DNS name is x%x.<seed> from GetDesirableServiceFlags(NODE_NONE) (src/net.cpp:1814-1815),
+# which returns NODE_NETWORK | NODE_WITNESS | NODE_MWEB (src/protocol.cpp:147-152), and those are
+# 1 | 1 << 3 | 1 << 24 (src/protocol.h:301, 312, 324), so nodes query x1000009.
+seed_flags = 0x1000009
+filters = [0x1, 0x5, 0x9, 0xd, 0x1000009, 0x100000d]
+# src/chainparams.cpp:253-255
+bootstrap_dns = ["testnet-seed.litecointools.com", "seed-b.litecoin.loshan.co.uk", "dnsseed-testnet.thrasher.io"]
+# src/chainparamsseeds.h:94-98 (chainparams_seed_test, loaded at src/chainparams.cpp:267): its
+# first five entries, all on default_port (contrib/seeds/nodes_test.txt:1-5).
+bootstrap_fixed = ["217.72.4.157:19335", "65.108.201.113:19335", "81.177.159.44:19335", "23.88.68.160:19335", "162.55.210.70:19335"]

@@ -1,0 +1,27 @@
+# Every value is cited from dashpay/dash@v23.1.10
+# (703b2a08de17982461f5ae5cb7662119ff5d1591).
+
+id = "dash-testnet"
+magic = "cee2caff"            # src/chainparams.cpp:423-426
+default_port = 19999          # src/chainparams.cpp:427
+protocol_version = 70240      # src/version.h:14 (PROTOCOL_VERSION)
+min_peer_version = 70221      # src/version.h:20 (MIN_PEER_PROTO_VERSION), src/net_processing.cpp:3945
+# src/net_processing.cpp:3967-3976: the masternode challenge and flag after relay are read only
+# under if (!vRecv.empty()), so a version message without them is accepted.
+version_trailer = "none"
+block_interval_secs = 150     # src/chainparams.cpp:399 (nPowTargetSpacing = 2.5 * 60)
+# src/version.h:26 (ADDRV2_PROTO_VERSION). src/net_processing.cpp:4249-4262: sendaddrv2 is
+# negotiated between version and verack; after verack the peer is disconnected.
+addrv2_min_version = 70223
+addrv2_placement = "before_verack"
+# The DNS name is x%x.<seed> from GetDesirableServiceFlags(NODE_NONE) (src/net.cpp:2782-2783),
+# which returns NODE_NETWORK (src/protocol.cpp:251-256), and NODE_NETWORK = 1 (src/protocol.h:317),
+# so nodes query x1.
+seed_flags = 0x1
+filters = [0x1, 0x5]
+# src/chainparams.cpp:444, commented "only supports x9". The crawler looks it up by its plain name,
+# which also answers; bootstrap_fixed covers the day it doesn't.
+bootstrap_dns = ["testnet-seed.dashdot.io"]
+# src/chainparamsseeds.h:208-226 (chainparams_seed_test, loaded at src/chainparams.cpp:440), the
+# first eight of contrib/seeds/nodes_test.txt:1-19.
+bootstrap_fixed = ["212.47.68.199:19999", "185.187.169.193:19999", "206.245.167.63:19999", "147.93.132.9:19999", "68.67.122.72:19999", "68.67.122.42:19999", "68.67.122.33:19999", "68.67.122.23:19999"]

@@ -1,0 +1,29 @@
+# Every value is cited from PIVX-Project/PIVX@v5.6.1
+# (af60f19642c6356061049df253e8036e81879f4e).
+
+id = "pivx-mainnet"
+magic = "90c4fde9"            # src/chainparams.cpp:318-321
+default_port = 51472          # src/chainparams.cpp:322
+protocol_version = 70927      # src/version.h:14 (PROTOCOL_VERSION)
+# src/version.h:21 (MIN_PEER_PROTO_VERSION_AFTER_ENFORCEMENT). The floor is
+# ActiveProtocol() (src/net_processing.cpp:1272), which returns this value once
+# SPORK_15_NEW_PROTOCOL_ENFORCEMENT_2 is active and 70926 before (src/validation.cpp:4220-4231).
+min_peer_version = 70927
+# Required: src/net_processing.cpp:1290-1301 reads a non-null challenge after relay as a
+# masternode connection and disconnects an inbound one when the node is not a masternode.
+version_trailer = "none"
+block_interval_secs = 60      # src/chainparams.cpp:245 (nTargetSpacing)
+# src/version.h:24 (MIN_BIP155_PROTOCOL_VERSION). src/net_processing.cpp:1324-1333 sends
+# sendaddrv2 before verack to peers at 70923 or later, and :1460-1463 accepts it before or
+# after verack.
+addrv2_min_version = 70923
+addrv2_placement = "before_verack"
+# Nodes query the plain name. GetDNSHost returns the bare host while the required services are
+# NODE_NETWORK (src/net.cpp:1547-1556), and they are nRelevantServices (src/net.cpp:1592) =
+# NODE_NETWORK (src/init.cpp:796). The plain name serves nodes whose services include
+# seed_flags, so seed_flags is that requirement, NODE_NETWORK = 1 (src/protocol.h:316).
+seed_flags = 0x1
+filters = [0x1]
+# src/chainparams.cpp:325-327
+bootstrap_dns = ["pivx.seed.fuzzbawls.pw", "pivx.seed2.fuzzbawls.pw", "dnsseed.liquid369.wtf"]
+bootstrap_fixed = []

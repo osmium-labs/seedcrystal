@@ -2,7 +2,9 @@
 
 **A multi-coin DNS seeder for Bitcoin-protocol UTXO chains.** Seedcrystal crawls your coin's
 P2P network, keeps score of which nodes are reliable and on the right chain, and hands the good
-ones to new nodes over DNS, from its own authoritative server or through Cloudflare.
+ones to new nodes over DNS, from its own authoritative server or through Cloudflare. It fills
+the role of a coin's *DNS seed*, the job [bitcoin-seeder](https://github.com/sipa/bitcoin-seeder)
+(`dnsseed`) does for Bitcoin, for any coin with a preset.
 
 [![CI](https://github.com/osmium-labs/seedcrystal/actions/workflows/ci.yml/badge.svg)](https://github.com/osmium-labs/seedcrystal/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -36,9 +38,11 @@ hard-coded addresses. Seedcrystal is built to get this right the first time:
   versions, service bits. Each built-in preset cites the line of the coin's source that every
   value came from.
 - **It serves only nodes worth connecting to.** Reliability is scored over five windows, from
-  two hours to a month. A chain-tip height floor ignores a single node lying about its height,
-  an optional checkpoint keeps forks out, and each answer holds at most two addresses per IPv4
-  /16 or IPv6 /32.
+  two hours to a month. Nodes too far behind or ahead of the chain tip are not served, and the
+  tip is the height a third of the network's groups (IPv4 /16, IPv6 /32) reach, at least three
+  of them: raising it takes nodes in that many groups, not a few nodes lying about their
+  height. An optional checkpoint keeps forks out, and each answer holds at most two addresses
+  per IPv4 /16 or IPv6 /32.
 - **Two ways to publish.** A built-in authoritative DNS server (UDP and TCP, no separate DNS
   software), or Cloudflare mode, which keeps A and AAAA records in your zone and never touches
   records it did not create.
@@ -55,9 +59,9 @@ hard-coded addresses. Seedcrystal is built to get this right the first time:
 2. **Score.** Every check updates the node's reliability over five windows (2 hours to a month).
    A node *meets the full bar* when any one window shows a high enough success rate over enough
    checks; three successful checks ten minutes apart are enough. To be *servable* it must also
-   run a recent enough protocol version, be no more than `tip_tolerance` blocks behind the
-   network's tip (about two hours of blocks), and, if the preset sets a checkpoint, be on that
-   chain.
+   run a recent enough protocol version, be within `tip_tolerance` blocks of the network's tip
+   (about two hours of blocks; further ahead means a false height or another chain), and, if the
+   preset sets a checkpoint, be on that chain.
 3. **Serve.** Every 30 seconds the servable nodes are collected into a snapshot, which is what
    DNS answers come from, up to 20 addresses per answer. While fewer than 10 nodes meet the full
    bar (on a fresh install, for example), *warm-up* nodes are served too: nodes that completed a
@@ -74,18 +78,41 @@ There are two ways to publish the snapshot. Pick one per seed name:
 
 ## Supported coins
 
-| Preset | Coin | Network | P2P port |
-|---|---|---|---|
-| `bitcoin-mainnet` | Bitcoin | mainnet | 8333 |
-| `bitcoin-testnet4` | Bitcoin | testnet4 | 48333 |
-| `osmium-mainnet` | Osmium | mainnet | 9969 |
-| `osmium-testnet` | Osmium | testnet | 19969 |
-| `raptoreum-mainnet` | Raptoreum | mainnet | 10226 |
-| `raptoreum-testnet` | Raptoreum | testnet | 10230 |
+| Preset | Coin | Network | P2P port | Tested |
+|---|---|---|---|---|
+| `bitcoin-mainnet` | Bitcoin | mainnet | 8333 | live crawl (2026-11-05) |
+| `bitcoin-testnet4` | Bitcoin | testnet4 | 48333 | live crawl (2026-11-05) |
+| `bitcoincash-mainnet` | Bitcoin Cash | mainnet | 8333 | live crawl (2026-11-05) |
+| `bitcoincash-testnet` | Bitcoin Cash | testnet | 18333 | live crawl (2026-11-05) |
+| `dash-mainnet` | Dash | mainnet | 9999 | live crawl (2026-11-05) |
+| `dash-testnet` | Dash | testnet | 19999 | live crawl (2026-11-05) |
+| `dogecoin-mainnet` | Dogecoin | mainnet | 22556 | live crawl (2026-11-05) |
+| `dogecoin-testnet` | Dogecoin | testnet | 44556 | live crawl (2026-11-05) |
+| `ecash-mainnet` | eCash | mainnet | 8333 | live crawl (2026-11-05) |
+| `ecash-testnet` | eCash | testnet | 18333 | live crawl (2026-11-05) |
+| `litecoin-mainnet` | Litecoin | mainnet | 9333 | live crawl (2026-11-05) |
+| `litecoin-testnet` | Litecoin | testnet | 19335 | live crawl (2026-11-05) |
+| `osmium-mainnet` | Osmium | mainnet | 9969 | end-to-end (2026-10-25) |
+| `osmium-testnet` | Osmium | testnet | 19969 | end-to-end (2026-10-25) |
+| `pivx-mainnet` | PIVX | mainnet | 51472 | live crawl (2026-11-05) |
+| `raptoreum-mainnet` | Raptoreum | mainnet | 10226 | end-to-end (2026-10-26) |
+| `raptoreum-testnet` | Raptoreum | testnet | 10230 | end-to-end (2026-10-26) |
 
-`seedcrystal presets` lists them with their port, seed name prefix and protocol version. Osmium and Raptoreum pass the end-to-end release gate: a stock
-node with an empty data directory takes its first peers from Seedcrystal. Another coin needs
-only a preset file; see [Adding a coin](#adding-a-coin-preset-reference).
+"Tested" says how far a preset has been checked against the coin's real nodes, and when:
+
+- **end-to-end**: a stock node of the coin, started with an empty data directory, takes its
+  first peers from Seedcrystal;
+- **live crawl**: Seedcrystal completed handshakes with the coin's nodes, then crawled its
+  network for ten minutes and served nodes running the coin's own client;
+- **handshake**: handshakes only, for a testnet with too few nodes to crawl;
+- **offline**: unit tests and the citations; not yet run against the coin's nodes.
+
+Dogecoin and PIVX nodes query the seed's plain name, not an `x<hex>` name. Their presets set
+`seed_flags` to the services those nodes require of a peer, so the plain name serves exactly those
+nodes.
+
+`seedcrystal presets` lists them with their port, seed name prefix and protocol version.
+Another coin needs only a preset file; see [Adding a coin](#adding-a-coin-preset-reference).
 
 ## Install
 
@@ -279,6 +306,17 @@ sudo -u seedcrystal seedcrystal seeds --config /etc/seedcrystal/seedcrystal.toml
   kept. A build refuses a database written by a newer one, so an accidental downgrade cannot
   damage it. Without the systemd unit, run `setcap` again after replacing the binary: the
   capability belongs to the file.
+- **Upgrading from 0.1.0.** The crawl database gains a column (schema 3). On its first start
+  the new build copies the database to `<preset id>.sqlite.v2.bak`, then changes it. Run
+  `seeds` only after that first start; before it, `seeds` refuses the old database and says so.
+  To go back to 0.1.0, which refuses a schema 3 database:
+  1. Stop the service.
+  2. Delete `<preset id>.sqlite-wal` and `<preset id>.sqlite-shm`. Restoring the old file next
+     to a leftover WAL would replay the new build's pages onto it.
+  3. Copy `<preset id>.sqlite.v2.bak` over `<preset id>.sqlite`.
+  4. Start the old binary.
+
+  This loses only the crawl state learned since the upgrade, which comes back within minutes.
 
 Files in `data_dir`, one set per network:
 
@@ -286,6 +324,7 @@ Files in `data_dir`, one set per network:
 |---|---|
 | `<preset id>.sqlite` | The crawl database: every known node, its score and its last check. |
 | `queries-<preset id>.json` | Authoritative mode: answered and empty A/AAAA queries per name, written every 60 s and at shutdown. `doctor` reads it. |
+| `census-<preset id>.json` | Both modes: what the network runs, by user agent and protocol version, rewritten every 60 s. `doctor` reads it. |
 | `shrink-guard-<preset id>.json` | Cloudflare mode: the last 24 hours of servable counts, so a restart during a crawl collapse keeps the guard's high-water mark. |
 
 The query log looks like
@@ -294,11 +333,35 @@ Its counters start over when the seeder restarts (`since` shows when), and names
 that resolvers invented are folded into one `_other` entry so they cannot crowd out the real
 ones.
 
+The census is a snapshot of the reachable network, overwritten each time; Seedcrystal keeps no
+history of it. It looks like
+
+```json
+{"built_at": <unix>, "window_s": 86400, "min_protocol": 70215, "tip": 856203,
+ "nodes": 179, "unverified": 4,
+ "agents": [{"user_agent": "/Osmium Core:1.2.0/", "nodes": 171}, {"user_agent": "", "nodes": 2}],
+ "protocol_versions": [{"version": 70231, "nodes": 179}]}
+```
+
+A node counts if it answered a handshake in the last `window_s` seconds, is a routable address
+on the preset's port (with `allow_private`, any address on any port, as for serving), and is
+not on another chain. A node that failed its latest re-probe still
+counts, and so does one that lags behind: there is no height floor. `unverified` is how many of
+those nodes never had their chain checked against the preset's checkpoint; it is `null` when
+the preset has no checkpoint, since then no chain is checked at all. Peers below
+`min_protocol`, the preset's `min_peer_version`, are refused at the handshake and never counted.
+`agents` is sorted by node count; past 64 agents the rest are summed into `_other`, the last
+entry. An empty agent is a node that sent none or has not been probed since the upgrade.
+`protocol_versions` lists the highest version first, one entry per version, so it has at most
+as many entries as there are counted nodes. Both lists add up to `nodes`. User
+agents are text the peers chose: control characters are removed, but anything that displays
+them must still escape them.
+
 ## Checking a seed: `doctor`
 
 `seedcrystal doctor --config <path> [--resolver ip[:port]]...` checks each configured seed from
-the outside, the way a coin node resolves it, and exits 1 if any check fails (a SKIP does not
-fail). It asks recursive resolvers (default 1.1.1.1, 8.8.8.8 and 9.9.9.9; repeat `--resolver`
+the outside, the way a coin node resolves it, then reads the seeder's census, and exits 1 if
+any check fails (a SKIP does not fail). It asks recursive resolvers (default 1.1.1.1, 8.8.8.8 and 9.9.9.9; repeat `--resolver`
 to choose your own), asking them to recurse, 3 s per query, retrying over TCP when the answer is truncated.
 A check passes only if every resolver that answered agrees; a resolver that times out is named
 in the detail but does not fail the check on its own.
@@ -321,9 +384,15 @@ in the detail but does not fail the check on its own.
    the day and hour of the latest sampled queries (UTC), and `~0 queries` for a silent one. If
    Cloudflare reports a GraphQL error alongside usable rows, the rows are used and the detail
    ends with `(Cloudflare also reported: <message>)`.
+5. **Network census.** Reads `census-<preset id>.json` (both modes) and summarises it: the node
+   count, the most common user agent and how many other agents there are. It fails when the
+   file is more than 5 minutes old, which means the seeder is not running or not writing it,
+   and is skipped when there is no file yet, which is also the case when `doctor` runs on a
+host other than the seeder's.
 
 Run `doctor` from the seeder's directory, or give `data_dir` as an absolute path: a relative one
-is resolved against the directory `doctor` runs in, and step 4 would not find the query log.
+is resolved against the directory `doctor` runs in, and steps 4 and 5 would not find the query
+log or the census.
 
 A healthy seed:
 
@@ -333,6 +402,7 @@ PASS  1  delegation — dnsseed.osmium.space is delegated to seed-ns.osmium.spac
 PASS  2  what a node resolves — x1.dnsseed.osmium.space and dnsseed.osmium.space resolve at 3 resolver(s), 12 distinct address(es)
 PASS  3  the answers are real nodes — 5 of 5 answered the handshake: ...
 PASS  4  real resolvers are asking — x1.dnsseed.osmium.space answered 41 time(s), last 3 min ago; the count includes your own dig and doctor runs
+PASS  5  network census — 179 nodes in 24 h · /Osmium Core:1.2.0/ 171 · 2 more agents
 ```
 
 A seeder that publishes the plain name but not the one nodes ask for:
@@ -461,7 +531,7 @@ serve_version_schedule = [{ height = 420420, version = 70219 }]
 | `addrv2_placement` | `"before_verack"` | `"after_verack"` sends `sendaddrv2` right after our `verack`, for nodes that expect it there. |
 | `checksum` | `"sha256d"` | P2P header checksum; `"groestl512d"` is double Groestl-512. |
 | `block_interval_secs` | required | The effective block spacing in seconds, > 0. |
-| `tip_tolerance` | `max(6, ceil(7200 / block_interval_secs))` | Blocks a node may trail the network's tip and still be served (two hours of blocks). |
+| `tip_tolerance` | `max(6, ceil(7200 / block_interval_secs))` | Blocks a node may trail, or lead, the network's tip and still be served (two hours of blocks). |
 | `min_serve_version` | `min_peer_version` | Lowest version that is served; must be at least `min_peer_version`. Older peers are still crawled but not served. |
 | `serve_version_schedule` | empty | List of `{ height, version }`. The floor at tip height `h` is the highest of `min_serve_version` and every entry with `height <= h`. Heights strictly ascending, versions non-decreasing. |
 | `min_height` | `0` | Nodes below this height are never served. |

@@ -1,9 +1,9 @@
 [package]
 name = "seedcrystal"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
-description = "Multi-coin DNS seeder for Bitcoin-protocol UTXO chains"
+description = "DNS seeder (dnsseed) for Bitcoin-protocol UTXO chains"
 repository = "https://github.com/osmium-labs/seedcrystal"
 readme = "README.md"
 keywords = ["dns", "seeder", "bitcoin", "p2p", "cryptocurrency"]

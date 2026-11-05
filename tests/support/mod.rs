@@ -55,6 +55,8 @@ pub struct FakeScript {
     pub checksum: Checksum,
     /// Raw `headers` payload sent in answer to `getheaders`; `None` ignores `getheaders`.
     pub headers_reply: Option<Vec<u8>>,
+    /// The user agent in the fake's `version`.
+    pub user_agent: String,
 }
 
 impl FakeScript {
@@ -79,6 +81,7 @@ impl FakeScript {
             relay_flush: Vec::new(),
             checksum: Checksum::Sha256d,
             headers_reply: None,
+            user_agent: "/fake:1/".into(),
         }
     }
 }
@@ -140,7 +143,7 @@ async fn serve(stream: tokio::net::TcpStream, script: FakeScript, deadline: Inst
                 timestamp: 1_700_000_000,
                 receiver: "127.0.0.1:1".parse().unwrap(),
                 nonce: 7,
-                user_agent: "/fake:1/".into(),
+                user_agent: script.user_agent.clone(),
                 start_height: script.start_height,
                 relay: true,
             },

@@ -1,8 +1,9 @@
 //! `seedcrystal doctor`: checks a seed from the outside, the way a coin node resolves it.
 //!
-//! The four checks follow the path of a real lookup: is the seed delegated here (or are its
-//! records in the Cloudflare zone), does the exact name the coin's node queries resolve,
-//! are the addresses it returns real nodes, and are real resolvers asking.
+//! The first four checks follow the path of a real lookup: is the seed delegated here (or are
+//! its records in the Cloudflare zone), does the exact name the coin's node queries resolve,
+//! are the addresses it returns real nodes, and are real resolvers asking. The fifth reads the
+//! seeder's census of the network.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -18,6 +19,7 @@ use tokio::net::{TcpStream, UdpSocket};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
+use crate::census;
 use crate::cloudflare::api::{ApiError, Client, OWNER_COMMENT, normalize_name};
 use crate::coin::CoinPreset;
 use crate::config::{self, NetworkConfig, Publish};
@@ -27,6 +29,8 @@ use crate::p2p::probe::{ProbeOptions, probe};
 
 /// How recent a query must be to count as "resolvers are asking".
 const FRESH_SECS: u64 = 24 * 3600;
+/// A census older than this means the seeder is not writing it.
+const CENSUS_STALE_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -85,7 +89,7 @@ impl Default for DoctorOptions {
     }
 }
 
-/// Runs the four checks for one network. Always returns one entry per step, in order.
+/// Runs the five checks for one network. Always returns one entry per step, in order.
 pub async fn run_checks(
     net: &NetworkConfig,
     preset: &CoinPreset,
@@ -102,7 +106,8 @@ pub async fn run_checks(
         Publish::Authoritative => asking(net, preset, &names),
         Publish::Cloudflare => cloudflare_asking(net, preset, &names, querylog::unix_now()).await,
     };
-    vec![step1, step2, step3, step4]
+    let step5 = census_step(net, preset, querylog::unix_now());
+    vec![step1, step2, step3, step4, step5]
 }
 
 fn check(step: u8, name: &str, status: Status, detail: String, fix: Option<String>) -> Check {
@@ -948,6 +953,72 @@ async fn cloudflare_asking(
         detail.push_str(&format!(" (Cloudflare also reported: {w})"));
     }
     check(4, NAME, Status::Pass, detail, None)
+}
+
+// ---- step 5: the network census -----------------------------------------------------------
+
+fn census_step(net: &NetworkConfig, preset: &CoinPreset, now: u64) -> Check {
+    const NAME: &str = "network census";
+    let path = census::path_for(&net.data_dir, &preset.id);
+    if !path.exists() {
+        return check(
+            5,
+            NAME,
+            Status::Skip,
+            format!(
+                "no census yet at {}: the seeder writes it once a minute while it runs, on the \
+                 seeder's host",
+                path.display()
+            ),
+            None,
+        );
+    }
+    let c = match census::read(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            return check(
+                5,
+                NAME,
+                Status::Fail,
+                format!("{e:#}"),
+                Some("remove the file; the seeder rewrites it".into()),
+            );
+        }
+    };
+    // A negative `built_at` is as good as none.
+    let age_s = u64::try_from(c.built_at).map_or(u64::MAX, |at| now.saturating_sub(at));
+    if age_s > CENSUS_STALE_SECS {
+        return check(
+            5,
+            NAME,
+            Status::Fail,
+            format!("census is {} old: is the seeder running?", age(age_s)),
+            Some(
+                "check the service: systemctl status seedcrystal, journalctl -u seedcrystal".into(),
+            ),
+        );
+    }
+    let window = u64::try_from(c.window_s).unwrap_or(0);
+    let mut detail = format!("{} nodes in {}", c.nodes, age(window));
+    if let Some(top) = c.agents.first() {
+        // Agents are ASCII by convention; anything else, bidi overrides included, could
+        // rearrange the printed line.
+        let agent: String = top
+            .user_agent
+            .chars()
+            .filter(|ch| ch.is_ascii_graphic() || *ch == ' ')
+            .collect();
+        let agent = match agent.trim() {
+            "" if top.user_agent.is_empty() => "(no agent)",
+            "" => "(unprintable agent)",
+            a => a,
+        };
+        detail.push_str(&format!(" \u{b7} {agent} {}", top.nodes));
+    }
+    if c.agents.len() > 1 {
+        detail.push_str(&format!(" \u{b7} {} more agents", c.agents.len() - 1));
+    }
+    check(5, NAME, Status::Pass, detail, None)
 }
 
 /// `10-25 15:00` from `2026-10-25T15:00:00Z`.

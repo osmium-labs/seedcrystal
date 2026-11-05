@@ -3,19 +3,22 @@
 //! Synchronous; async callers wrap it in `spawn_blocking`. Times are unix
 //! seconds supplied by the caller, never read from the clock here.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, params};
+use tracing::info;
 
 use crate::coin::{VersionStep, serve_floor};
+use crate::dns::answer::netgroup;
 use crate::p2p::ChainCheck;
 use crate::p2p::messages::{AddrEntry, NetAddr};
 use crate::score::Stats;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const GOOD_RETRY: i64 = 15 * 60;
 const BAD_RETRY_MIN: i64 = 5 * 60;
 const BAD_RETRY_MAX: i64 = 24 * 3600;
@@ -30,7 +33,7 @@ pub struct NodeStore {
     conn: Mutex<Connection>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Good {
         version: i32,
@@ -38,6 +41,8 @@ pub enum Outcome {
         height: i32,
         harvested: bool,
         chain: ChainCheck,
+        /// The peer's `version` user agent, as decoded.
+        user_agent: String,
     },
     Bad,
     /// The peer answered, but its headers do not build on the checkpoint.
@@ -78,6 +83,15 @@ pub struct ServablePolicy {
 pub struct Servable {
     pub addr: SocketAddr,
     pub services: u64,
+}
+
+/// One node counted by the census.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CensusRow {
+    pub user_agent: String,
+    pub version: i32,
+    /// Never verified against a checkpoint.
+    pub unverified: bool,
 }
 
 /// Collapse IPv4-mapped IPv6 (`::ffff:a.b.c.d`) to plain IPv4.
@@ -164,10 +178,83 @@ fn due_sql(kind: DueKind, allow_private: bool) -> String {
     )
 }
 
+fn has_column(conn: &Connection, name: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('nodes') WHERE name = ?1)",
+        [name],
+        |r| r.get(0),
+    )?)
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// Makes a rename in `path`'s directory durable before the store is changed, so a power loss
+/// cannot leave a migrated store without its backup. Directories cannot be synced this way off
+/// Unix; there it does nothing.
+fn sync_parent_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let dir = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        std::fs::File::open(dir)
+            .and_then(|d| d.sync_all())
+            .with_context(|| format!("syncing directory {}", dir.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Schema 2 to 3: adds `user_agent`. `VACUUM INTO` writes a consistent copy that includes rows
+/// still in the WAL (a plain file copy would miss them); it is written under a temporary name,
+/// synced, renamed and the directory synced, so `<file>.v2.bak` is always a complete database
+/// that survives a power loss. The column and the version change commit together, so a crash
+/// leaves a schema 2 store behind.
+fn migrate_to_v3(conn: &mut Connection, path: &Path) -> Result<()> {
+    let backup = with_suffix(path, ".v2.bak");
+    let partial = with_suffix(path, ".v2.bak.tmp");
+    match std::fs::remove_file(&partial) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(e).with_context(|| format!("removing {}", partial.display()));
+        }
+        _ => {}
+    }
+    let target = partial
+        .to_str()
+        .with_context(|| format!("node store path {} is not UTF-8", path.display()))?;
+    conn.execute("VACUUM INTO ?1", [target])
+        .with_context(|| format!("copying node store to {}", partial.display()))?;
+    std::fs::File::open(&partial)
+        .and_then(|f| f.sync_all())
+        .with_context(|| format!("syncing {}", partial.display()))?;
+    std::fs::rename(&partial, &backup)
+        .with_context(|| format!("renaming {} to {}", partial.display(), backup.display()))?;
+    sync_parent_dir(&backup)?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "ALTER TABLE nodes ADD COLUMN user_agent TEXT NOT NULL DEFAULT '';
+         PRAGMA user_version = 3;",
+    )?;
+    tx.commit()?;
+    info!(
+        "node store {} migrated to schema version 3; the previous version is kept at {}",
+        path.display(),
+        backup.display()
+    );
+    Ok(())
+}
+
 impl NodeStore {
-    /// Opens or creates the store; a store newer than this build is refused.
+    /// Opens or creates the store. A schema 2 store is first copied to `<file>.v2.bak`, then
+    /// migrated in place; a store newer than this build is refused.
     pub fn open(path: &Path) -> Result<NodeStore> {
-        let conn = Connection::open(path)
+        let mut conn = Connection::open(path)
             .with_context(|| format!("opening node store {}", path.display()))?;
         conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -195,6 +282,7 @@ impl NodeStore {
                 first_seen INTEGER NOT NULL,
                 chain INTEGER NOT NULL DEFAULT 0,
                 chain_ref TEXT NOT NULL DEFAULT '',
+                user_agent TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY (ip, port)
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS nodes_new_pub ON nodes (first_seen) WHERE tried = 0 AND routable = 1;
@@ -204,15 +292,19 @@ impl NodeStore {
             CREATE INDEX IF NOT EXISTS nodes_good_any ON nodes (next_try) WHERE tried = 1 AND last_ok = 1;
             CREATE INDEX IF NOT EXISTS nodes_bad_any ON nodes (next_try) WHERE tried = 1 AND last_ok = 0;",
         )?;
+        // A new table has the column already; only an older one is migrated.
+        if !has_column(&conn, "user_agent")? {
+            migrate_to_v3(&mut conn, path)?;
+        }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(NodeStore {
             conn: Mutex::new(conn),
         })
     }
 
-    /// Opens an existing store for reading, for reports. It never creates the file or runs DDL:
-    /// a store at any other schema version is refused, so a report cannot write the live
-    /// database while the service owns it. `query_only` refuses every
+    /// Opens an existing store for reading, for reports. It never creates the file, runs DDL
+    /// or migrates: a store at any other schema version is refused, so a report cannot write
+    /// the live database or its backup while the service owns them. `query_only` refuses every
     /// write. The connection is read-write only so that, as the last one to close, it removes
     /// the `-wal` and `-shm` files it opened; a read-only connection would leave them behind.
     pub fn open_existing(path: &Path) -> Result<NodeStore> {
@@ -225,6 +317,14 @@ impl NodeStore {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .with_context(|| format!("reading node store {}", path.display()))?;
+        if version < SCHEMA_VERSION {
+            anyhow::bail!(
+                "node store {} is schema {version}; stop the service, start `seedcrystal run` with \
+                 this build once to migrate it (it keeps the old file as {}), then run `seeds`",
+                path.display(),
+                with_suffix(path, ".v2.bak").display()
+            );
+        }
         if version != SCHEMA_VERSION {
             anyhow::bail!(
                 "node store {} is schema {version}; this build reads schema {SCHEMA_VERSION}",
@@ -306,7 +406,7 @@ impl NodeStore {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let mut stats = Stats::decode(&stats_s).unwrap_or_default();
-        let verdict = match outcome {
+        let verdict = match &outcome {
             Outcome::Good {
                 chain: ChainCheck::Verified,
                 ..
@@ -314,12 +414,13 @@ impl NodeStore {
             Outcome::WrongChain { .. } => Some(CHAIN_WRONG),
             _ => None,
         };
-        match outcome {
+        match &outcome {
             Outcome::Good {
                 version,
                 services,
                 height,
                 harvested,
+                user_agent,
                 ..
             } => {
                 stats.update(true, now);
@@ -327,18 +428,20 @@ impl NodeStore {
                     "UPDATE nodes SET services = ?3, version = ?4, height = ?5, stats = ?6,
                          last_ok = 1, last_good = ?7, tried = 1, consecutive_failures = 0,
                          next_try = ?8,
-                         last_harvest = CASE WHEN ?9 THEN ?7 ELSE last_harvest END
+                         last_harvest = CASE WHEN ?9 THEN ?7 ELSE last_harvest END,
+                         user_agent = ?10
                      WHERE ip = ?1 AND port = ?2",
                     params![
                         ip_s,
                         port,
-                        services as i64,
+                        *services as i64,
                         version,
                         height,
                         stats.encode(),
                         now,
                         now + GOOD_RETRY,
-                        harvested
+                        harvested,
+                        user_agent
                     ],
                 )?;
             }
@@ -437,38 +540,80 @@ impl NodeStore {
         Ok(out)
     }
 
-    /// Network tip as seen by this store: the 3rd-highest height among nodes
-    /// that pass every non-height servable check (a verified chain among them,
-    /// when a checkpoint is set) and were good within 2 h
-    /// (the maximum if fewer than 3 qualify, 0 if none). One node lying about
-    /// its height therefore cannot move the tip.
+    /// Network tip as seen by this store, from nodes that pass every non-height servable check
+    /// (a verified chain among them, when a checkpoint is set) and were good within 2 h. Each
+    /// network group (see [`netgroup`]) votes once, with its nodes' lower median height, and the
+    /// tip is the highest height that a third of the groups reach, but at least three of them
+    /// (all of them below three; 0 if none).
+    ///
+    /// Raising the tip therefore takes nodes in a third of the network's groups, at least
+    /// three, not a few nodes reporting a false height. A host with both an IPv4 and an IPv6
+    /// address votes in two groups. With three groups or fewer, one lagging group sets the tip:
+    /// a laggard can lower it, a liar cannot raise it.
     pub fn tip(&self, policy: &ServablePolicy, now: i64) -> Result<i32> {
         let conn = self.conn();
         let mut stmt = conn.prepare_cached(
-            "SELECT height FROM nodes
+            "SELECT ip, height FROM nodes
              WHERE last_ok = 1 AND last_good >= ?1 AND version >= ?2
                AND (routable = 1 OR ?3) AND (?4 IS NULL OR port = ?4)
-               AND (?5 IS NULL OR (chain = 1 AND chain_ref = ?5))
-             ORDER BY height DESC LIMIT 3",
+               AND (?5 IS NULL OR (chain = 1 AND chain_ref = ?5))",
         )?;
-        let heights: Vec<i32> = stmt
-            .query_map(
-                params![
-                    now - TIP_WINDOW,
-                    policy.serve_floor_base,
-                    policy.allow_private,
-                    policy.port,
-                    policy.checkpoint_ref
-                ],
-                |r| r.get(0),
-            )?
-            .collect::<rusqlite::Result<_>>()?;
-        let tip = if heights.len() < 3 {
-            heights.first()
-        } else {
-            heights.last()
-        };
-        Ok(tip.copied().unwrap_or(0))
+        let rows = stmt.query_map(
+            params![
+                now - TIP_WINDOW,
+                policy.serve_floor_base,
+                policy.allow_private,
+                policy.port,
+                policy.checkpoint_ref
+            ],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)?)),
+        )?;
+        let mut groups: HashMap<(bool, [u8; 4]), Vec<i32>> = HashMap::new();
+        for row in rows {
+            let (ip, height) = row?;
+            let Ok(ip) = ip.parse::<IpAddr>() else {
+                continue;
+            };
+            groups
+                .entry((ip.is_ipv6(), netgroup(&ip)))
+                .or_default()
+                .push(height);
+        }
+        let mut votes: Vec<i32> = groups
+            .into_values()
+            .map(|mut heights| {
+                heights.sort_unstable();
+                heights[(heights.len() - 1) / 2]
+            })
+            .collect();
+        votes.sort_unstable_by(|a, b| b.cmp(a));
+        let quorum = votes.len().div_ceil(3).max(3).min(votes.len());
+        Ok(quorum.checked_sub(1).map_or(0, |i| votes[i]))
+    }
+
+    /// The nodes the census counts: good at `since` or later, routable (unless the policy
+    /// allows private addresses), on the policy's port and not on another chain. A failed
+    /// re-probe since, a missing chain verdict and a low height do not exclude a node.
+    pub fn census_rows(&self, policy: &ServablePolicy, since: i64) -> Result<Vec<CensusRow>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT user_agent, version, chain FROM nodes
+             WHERE last_good > 0 AND last_good >= ?1
+               AND (routable = 1 OR ?2) AND (?3 IS NULL OR port = ?3)
+               AND chain != ?4
+             ORDER BY ip, port",
+        )?;
+        let rows = stmt.query_map(
+            params![since, policy.allow_private, policy.port, CHAIN_WRONG],
+            |r| {
+                Ok(CensusRow {
+                    user_agent: r.get(0)?,
+                    version: r.get(1)?,
+                    unverified: r.get::<_, i64>(2)? == 0,
+                })
+            },
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn servable(&self, policy: &ServablePolicy, now: i64) -> Result<Vec<Servable>> {
@@ -476,10 +621,14 @@ impl NodeStore {
         let floor_version = serve_floor(policy.serve_floor_base, &policy.schedule, tip);
         let floor_height =
             (i64::from(tip) - i64::from(policy.tip_tolerance)).max(i64::from(policy.min_height));
+        // A node further ahead than the tolerance is lying or on another chain. With no tip
+        // (nothing recent enough to vote) there is nothing to be ahead of.
+        let ceiling_height = (tip > 0).then(|| i64::from(tip) + i64::from(policy.tip_tolerance));
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT ip, port, services, stats, last_good FROM nodes
              WHERE last_ok = 1 AND version >= ?1 AND height >= ?2
+               AND (?6 IS NULL OR height <= ?6)
                AND (routable = 1 OR ?3) AND (?4 IS NULL OR port = ?4)
                AND (?5 IS NULL OR (chain = 1 AND chain_ref = ?5))
              ORDER BY ip, port",
@@ -490,7 +639,8 @@ impl NodeStore {
                 floor_height,
                 policy.allow_private,
                 policy.port,
-                policy.checkpoint_ref
+                policy.checkpoint_ref,
+                ceiling_height
             ],
             |r| {
                 Ok((
@@ -563,6 +713,7 @@ mod tests {
             height,
             harvested: false,
             chain: ChainCheck::NotChecked,
+            user_agent: String::new(),
         }
     }
 
@@ -608,6 +759,7 @@ mod tests {
                     height: 1000,
                     harvested: false,
                     chain: ChainCheck::NotChecked,
+                    user_agent: String::new(),
                 },
                 t,
                 None,
@@ -673,6 +825,7 @@ mod tests {
             height,
             harvested: false,
             chain: ChainCheck::NotChecked,
+            user_agent: String::new(),
         }
     }
 
@@ -762,17 +915,140 @@ mod tests {
         assert_eq!(addrs(&store, &policy(), 110).len(), 5);
     }
 
+    /// One node at `height` in each of `groups` IPv4 /16 network groups, starting at `first`.
+    fn nodes_in_groups(store: &NodeStore, first: u8, groups: u8, height: i32, t: i64) {
+        for g in first..first + groups {
+            store
+                .record(sa(&format!("9.{g}.0.1:8080")), good(height), t, None)
+                .unwrap();
+        }
+    }
+
     #[test]
-    fn tip_rule_is_unchanged_below_three_nodes() {
+    fn liars_in_fewer_than_a_third_of_the_groups_cannot_move_the_tip() {
+        // bitcoin-mainnet, 2026-11-05: seven nodes claiming a height ~5,900 blocks ahead set the
+        // 3rd-highest tip, and the seed served only them.
+        let (_d, store) = open();
+        let t = 100;
+        nodes_in_groups(&store, 0, 30, 1000, t);
+        nodes_in_groups(&store, 100, 7, 6000, t);
+        assert_eq!(store.tip(&policy(), t).unwrap(), 1000);
+        let served = addrs(&store, &policy(), t + 10);
+        for g in 0..30 {
+            assert!(
+                served.contains(&sa(&format!("9.{g}.0.1:8080"))),
+                "9.{g}.0.1 not served"
+            );
+        }
+    }
+
+    #[test]
+    fn nodes_far_above_the_tip_are_not_served() {
+        // bitcoin-mainnet, 2026-11-05: once the tip was right, eight nodes ~5,900 blocks ahead
+        // were still served next to the honest ones.
+        let (_d, store) = open();
+        let t = 100;
+        nodes_in_groups(&store, 0, 30, 1000, t);
+        nodes_in_groups(&store, 100, 7, 6000, t);
+        let served = addrs(&store, &policy(), t + 10);
+        assert_eq!(served.len(), 30);
+        assert!(!served.contains(&sa("9.100.0.1:8080")));
+    }
+
+    #[test]
+    fn a_node_up_to_the_tolerance_above_the_tip_is_served() {
+        let (_d, store) = open();
+        let t = 100;
+        nodes_in_groups(&store, 0, 5, 1000, t);
+        // tolerance is 100 in policy()
+        nodes_in_groups(&store, 50, 1, 1100, t);
+        nodes_in_groups(&store, 60, 1, 1101, t);
+        let served = addrs(&store, &policy(), t + 10);
+        assert!(served.contains(&sa("9.50.0.1:8080")));
+        assert!(!served.contains(&sa("9.60.0.1:8080")));
+    }
+
+    #[test]
+    fn without_a_tip_no_height_is_too_high() {
+        let (_d, store) = open();
+        let t = 50_000;
+        for i in 1..=10 {
+            make_full_bar(&store, sa(&format!("9.{i}.0.1:8080")), t);
+        }
+        // Long after the last probe no node is recent enough to vote: the tip is unknown.
+        let later = t + 1200 + TIP_WINDOW + 1;
+        assert_eq!(store.tip(&policy(), later).unwrap(), 0);
+        assert_eq!(addrs(&store, &policy(), later).len(), 10);
+    }
+
+    #[test]
+    fn many_liars_in_one_group_count_once() {
+        let (_d, store) = open();
+        let t = 100;
+        nodes_in_groups(&store, 0, 5, 1000, t);
+        for i in 1..=10 {
+            store
+                .record(sa(&format!("7.7.0.{i}:8080")), good(6000), t, None)
+                .unwrap();
+        }
+        assert_eq!(store.tip(&policy(), t).unwrap(), 1000);
+    }
+
+    #[test]
+    fn one_liar_in_an_honest_group_does_not_speak_for_it() {
+        let (_d, store) = open();
+        let t = 100;
+        for i in 1..=3 {
+            store
+                .record(sa(&format!("7.7.0.{i}:8080")), good(1000), t, None)
+                .unwrap();
+        }
+        store
+            .record(sa("7.7.0.9:8080"), good(6000), t, None)
+            .unwrap();
+        nodes_in_groups(&store, 0, 2, 1000, t);
+        assert_eq!(store.tip(&policy(), t).unwrap(), 1000);
+    }
+
+    #[test]
+    fn a_third_of_the_groups_sets_the_tip() {
+        let (_d, store) = open();
+        let t = 100;
+        // 9 groups: the 3 highest are a third of them.
+        nodes_in_groups(&store, 0, 3, 1010, t);
+        nodes_in_groups(&store, 10, 6, 1000, t);
+        assert_eq!(store.tip(&policy(), t).unwrap(), 1010);
+        // 12 groups: 3 are no longer a third, so the tip is the 4th highest.
+        nodes_in_groups(&store, 20, 3, 1000, t);
+        assert_eq!(store.tip(&policy(), t).unwrap(), 1000);
+    }
+
+    #[test]
+    fn two_groups_take_the_lower_vote() {
+        // Below three groups every group must reach the tip: a laggard can lower it, a liar
+        // cannot raise it.
         let (_d, store) = open();
         store
-            .record(sa("8.8.8.1:8080"), good(1000), 100, None)
+            .record(sa("8.1.0.1:8080"), good(1000), 100, None)
             .unwrap();
         store
-            .record(sa("8.8.8.2:8080"), good(0), 100, None)
+            .record(sa("8.2.0.1:8080"), good(990), 100, None)
+            .unwrap();
+        assert_eq!(store.tip(&policy(), 110).unwrap(), 990);
+        assert_eq!(addrs(&store, &policy(), 110).len(), 2);
+    }
+
+    #[test]
+    fn a_two_node_group_votes_its_lower_height() {
+        let (_d, store) = open();
+        store
+            .record(sa("7.7.0.1:8080"), good(1000), 100, None)
+            .unwrap();
+        store
+            .record(sa("7.7.0.2:8080"), good(6000), 100, None)
             .unwrap();
         assert_eq!(store.tip(&policy(), 110).unwrap(), 1000);
-        assert_eq!(addrs(&store, &policy(), 110), vec![sa("8.8.8.1:8080")]);
+        assert_eq!(addrs(&store, &policy(), 110), vec![sa("7.7.0.1:8080")]);
     }
 
     #[test]
@@ -787,6 +1063,7 @@ mod tests {
                     height: 1000,
                     harvested: false,
                     chain: ChainCheck::NotChecked,
+                    user_agent: String::new(),
                 },
                 100,
                 None,
@@ -842,15 +1119,17 @@ mod tests {
         let p = policy();
         assert_eq!(store.tip(&p, 0).unwrap(), 0);
         store
-            .record(sa("8.8.8.1:8080"), good(500), 0, None)
+            .record(sa("8.1.0.1:8080"), good(500), 0, None)
             .unwrap();
         store
-            .record(sa("8.8.8.2:8080"), good(900), 5000, None)
+            .record(sa("8.2.0.1:8080"), good(900), 5000, None)
             .unwrap();
-        // Two qualifying nodes: the tip is the maximum.
-        assert_eq!(store.tip(&p, 5000).unwrap(), 900);
+        // Two qualifying groups: the tip is the lower vote.
+        assert_eq!(store.tip(&p, 5000).unwrap(), 500);
+        assert_eq!(store.tip(&p, 7200).unwrap(), 500);
+        // The older node leaves the window; the newer one alone sets the tip.
+        assert_eq!(store.tip(&p, 7201).unwrap(), 900);
         assert_eq!(store.tip(&p, 7200 + 5001).unwrap(), 0);
-        assert_eq!(store.tip(&p, 7200).unwrap(), 900);
     }
 
     #[test]
@@ -882,15 +1161,17 @@ mod tests {
                 height,
                 harvested: false,
                 chain: ChainCheck::Verified,
+                user_agent: String::new(),
             };
             store.record(sa(ip), outcome, t, Some(reference)).unwrap();
         };
+        // Every node in its own network group, so each one votes.
         for i in 0..3 {
-            verified(&store, &format!("8.8.8.{}:8080", i + 1), 1000, "A");
-            verified(&store, &format!("8.8.7.{}:8080", i + 1), 8_000_000, "B");
+            verified(&store, &format!("8.{}.0.1:8080", i + 1), 1000, "A");
+            verified(&store, &format!("8.{}.0.1:8080", i + 11), 8_000_000, "B");
             store
                 .record(
-                    sa(&format!("8.8.9.{}:8080", i + 1)),
+                    sa(&format!("8.{}.0.1:8080", i + 21)),
                     good(9_000_000),
                     t,
                     Some("A"),
@@ -913,14 +1194,14 @@ mod tests {
         for i in 0..3 {
             store
                 .record(
-                    sa(&format!("8.8.8.{}:8080", i + 1)),
+                    sa(&format!("8.{}.0.1:8080", i + 1)),
                     good(1000),
                     t - 3700,
                     None,
                 )
                 .unwrap();
             store
-                .record(sa(&format!("8.8.9.{}:8080", i + 1)), good(900), t, None)
+                .record(sa(&format!("8.{}.0.1:8080", i + 11)), good(900), t, None)
                 .unwrap();
         }
         // The older nodes are 3700 s old: inside the 7200 s window.
@@ -931,12 +1212,12 @@ mod tests {
     }
 
     #[test]
-    fn tip_is_third_highest_and_ignores_unqualified_nodes() {
+    fn tip_is_third_highest_of_few_groups_and_ignores_unqualified_nodes() {
         let (_d, store) = open();
         let t = 100;
         for (i, h) in [1000, 1001, 1002, 999, 1000].iter().enumerate() {
             store
-                .record(sa(&format!("8.8.8.{}:8080", i + 1)), good(*h), t, None)
+                .record(sa(&format!("8.{}.8.1:8080", i + 1)), good(*h), t, None)
                 .unwrap();
         }
         assert_eq!(store.tip(&policy(), t).unwrap(), 1000);
@@ -956,6 +1237,7 @@ mod tests {
                     height: 9_000_000,
                     harvested: false,
                     chain: ChainCheck::NotChecked,
+                    user_agent: String::new(),
                 },
                 t,
                 None,
@@ -965,7 +1247,7 @@ mod tests {
     }
 
     #[test]
-    fn one_lying_height_does_not_unserve_honest_nodes() {
+    fn one_lying_height_unserves_neither_honest_nodes_nor_is_served() {
         let (_d, store) = open();
         let t = 100;
         for i in 1..=5 {
@@ -977,12 +1259,11 @@ mod tests {
             .record(sa("8.8.4.4:8080"), good(10_000_000), t, None)
             .unwrap();
         let got = store.servable(&policy(), t + 10).unwrap();
-        assert_eq!(got.len(), 6);
-        let honest = got
-            .iter()
-            .filter(|s| s.addr.ip().to_string().starts_with("8.8.8."))
-            .count();
-        assert_eq!(honest, 5);
+        assert_eq!(got.len(), 5);
+        assert!(
+            got.iter()
+                .all(|s| s.addr.ip().to_string().starts_with("8.8.8."))
+        );
     }
 
     #[test]
@@ -1181,7 +1462,7 @@ mod tests {
         let v: i64 = c
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
         // An unversioned existing database is adopted at the current version.
         c.pragma_update(None, "user_version", 0).unwrap();
         drop(c);
@@ -1190,11 +1471,360 @@ mod tests {
         let v: i64 = c
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 2);
-        c.pragma_update(None, "user_version", 3).unwrap();
+        assert_eq!(v, 3);
+        c.pragma_update(None, "user_version", 4).unwrap();
         drop(c);
         let err = NodeStore::open(&path).err().unwrap().to_string();
-        assert!(err.contains("schema version 3"), "{err}");
+        assert!(err.contains("schema version 4"), "{err}");
+    }
+
+    /// The `nodes` table exactly as schema version 2 (0.1.0) created it.
+    const V2_TABLE: &str = "CREATE TABLE nodes (
+                ip TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                routable INTEGER NOT NULL,
+                services INTEGER NOT NULL DEFAULT 0,
+                version INTEGER NOT NULL DEFAULT 0,
+                height INTEGER NOT NULL DEFAULT 0,
+                stats TEXT NOT NULL DEFAULT '',
+                last_ok INTEGER NOT NULL DEFAULT 0,
+                last_good INTEGER NOT NULL DEFAULT 0,
+                tried INTEGER NOT NULL DEFAULT 0,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                next_try INTEGER NOT NULL DEFAULT 0,
+                last_harvest INTEGER NOT NULL DEFAULT 0,
+                first_seen INTEGER NOT NULL,
+                chain INTEGER NOT NULL DEFAULT 0,
+                chain_ref TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (ip, port)
+            ) WITHOUT ROWID";
+
+    const V2_COLUMNS: &str = "ip, port, routable, services, version, height, stats, last_ok, \
+         last_good, tried, consecutive_failures, next_try, last_harvest, first_seen, chain, chain_ref";
+
+    fn user_version(c: &Connection) -> i64 {
+        c.query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// Every v2 column of every row, as text, in key order.
+    fn v2_rows(c: &Connection) -> Vec<Vec<String>> {
+        let mut stmt = c
+            .prepare(&format!("SELECT {V2_COLUMNS} FROM nodes ORDER BY ip, port"))
+            .unwrap();
+        let n = stmt.column_count();
+        stmt.query_map([], |r| {
+            (0..n)
+                .map(|i| {
+                    r.get::<_, rusqlite::types::Value>(i)
+                        .map(|v| format!("{v:?}"))
+                })
+                .collect()
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+    }
+
+    /// A v2 store at `path` whose two rows are committed but still in the WAL of the returned
+    /// connection; keep it open while the store under test opens the file.
+    fn v2_store_in_wal(path: &Path, user_version: i64) -> Connection {
+        let writer = Connection::open(path).unwrap();
+        writer
+            .query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))
+            .unwrap();
+        writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        writer.execute_batch(V2_TABLE).unwrap();
+        writer
+            .pragma_update(None, "user_version", user_version)
+            .unwrap();
+        for (i, ip) in ["8.8.8.1", "8.8.8.2"].iter().enumerate() {
+            let i = i as i64 + 1;
+            writer
+                .execute(
+                    "INSERT INTO nodes (ip, port, routable, services, version, height, stats,
+                         last_ok, last_good, tried, consecutive_failures, next_try, last_harvest,
+                         first_seen, chain, chain_ref)
+                     VALUES (?1, 8080, 1, ?2, 70216, ?3, 'stats', 1, ?4, 1, ?2, ?5, ?6, ?7, 1, 'A')",
+                    params![ip, i, 1000 + i, 500 + i, 600 + i, 700 + i, 5 + i],
+                )
+                .unwrap();
+        }
+        let wal = with_suffix(path, "-wal");
+        assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+        writer
+    }
+
+    #[test]
+    fn v2_store_migrates_with_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        // Quotes in the path must not break the backup statement.
+        let sub = dir.path().join("it's \"here\"");
+        std::fs::create_dir(&sub).unwrap();
+        let path = sub.join("nodes.db");
+        let backup = sub.join("nodes.db.v2.bak");
+        let partial = sub.join("nodes.db.v2.bak.tmp");
+        // Leftovers from an earlier attempt are replaced, not fatal.
+        std::fs::write(&backup, b"stale").unwrap();
+        std::fs::write(&partial, b"stale").unwrap();
+
+        let writer = v2_store_in_wal(&path, 2);
+        let before = v2_rows(&writer);
+        assert_eq!(before.len(), 2);
+
+        let store = NodeStore::open(&path).unwrap();
+        assert_eq!(user_version(&store.conn()), 3);
+        assert_eq!(v2_rows(&store.conn()), before);
+        let agents: Vec<String> = store
+            .conn()
+            .prepare("SELECT user_agent FROM nodes")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(agents, ["", ""]);
+
+        let bak = Connection::open(&backup).unwrap();
+        assert_eq!(user_version(&bak), 2);
+        assert_eq!(v2_rows(&bak), before);
+        assert!(bak.prepare("SELECT user_agent FROM nodes").is_err());
+        assert!(!partial.exists());
+        drop(writer);
+    }
+
+    #[test]
+    fn reopening_a_v3_store_writes_no_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nodes.db");
+        let backup = dir.path().join("nodes.db.v2.bak");
+        drop(v2_store_in_wal(&path, 2));
+        drop(NodeStore::open(&path).unwrap());
+        std::fs::remove_file(&backup).unwrap();
+        drop(NodeStore::open(&path).unwrap());
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn unversioned_v2_table_migrates_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nodes.db");
+        let writer = v2_store_in_wal(&path, 0);
+        let store = NodeStore::open(&path).unwrap();
+        assert_eq!(user_version(&store.conn()), 3);
+        assert!(store.conn().prepare("SELECT user_agent FROM nodes").is_ok());
+        assert!(dir.path().join("nodes.db.v2.bak").exists());
+        drop(writer);
+    }
+
+    #[test]
+    fn new_store_is_created_at_version_3_without_a_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nodes.db");
+        let store = NodeStore::open(&path).unwrap();
+        assert_eq!(user_version(&store.conn()), 3);
+        assert!(store.conn().prepare("SELECT user_agent FROM nodes").is_ok());
+        drop(store);
+        drop(NodeStore::open(&path).unwrap());
+        assert!(!dir.path().join("nodes.db.v2.bak").exists());
+    }
+
+    #[test]
+    fn open_existing_refuses_a_v2_store_without_touching_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nodes.db");
+        let c = Connection::open(&path).unwrap();
+        c.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))
+            .unwrap();
+        c.execute_batch(V2_TABLE).unwrap();
+        c.pragma_update(None, "user_version", 2).unwrap();
+        drop(c);
+        let before = std::fs::read(&path).unwrap();
+
+        let err = NodeStore::open_existing(&path).err().unwrap().to_string();
+        assert!(err.contains("schema 2"), "{err}");
+        assert!(err.contains("seedcrystal run"), "{err}");
+        assert!(err.contains("stop the service"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!dir.path().join("nodes.db.v2.bak").exists());
+        assert!(!dir.path().join("nodes.db.v2.bak.tmp").exists());
+    }
+
+    fn agent_of(store: &NodeStore, addr: &str) -> String {
+        let a = sa(addr);
+        store
+            .conn()
+            .query_row(
+                "SELECT user_agent FROM nodes WHERE ip = ?1 AND port = ?2",
+                params![a.ip().to_string(), a.port()],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn good_agent(agent: &str) -> Outcome {
+        Outcome::Good {
+            version: 70216,
+            services: 1,
+            height: 1000,
+            harvested: false,
+            chain: ChainCheck::NotChecked,
+            user_agent: agent.into(),
+        }
+    }
+
+    #[test]
+    fn user_agent_is_kept_from_the_latest_good_probe() {
+        let (_d, store) = open();
+        let a = "8.8.8.1:8080";
+        store
+            .record(sa(a), good_agent("/Osmium Core:1.1.9/"), 100, None)
+            .unwrap();
+        assert_eq!(agent_of(&store, a), "/Osmium Core:1.1.9/");
+        store.record(sa(a), Outcome::Bad, 200, None).unwrap();
+        assert_eq!(agent_of(&store, a), "/Osmium Core:1.1.9/");
+        store
+            .record(
+                sa(a),
+                Outcome::WrongChain { harvested: false },
+                300,
+                Some("A"),
+            )
+            .unwrap();
+        assert_eq!(agent_of(&store, a), "/Osmium Core:1.1.9/");
+        store
+            .record(sa(a), good_agent("/Osmium Core:1.2.0/"), 400, None)
+            .unwrap();
+        assert_eq!(agent_of(&store, a), "/Osmium Core:1.2.0/");
+    }
+
+    /// The agents `census_rows` returns, sorted, with `*` marking an unverified row.
+    fn census_agents(store: &NodeStore, p: &ServablePolicy, since: i64) -> Vec<String> {
+        let mut got: Vec<String> = store
+            .census_rows(p, since)
+            .unwrap()
+            .into_iter()
+            .map(|r| {
+                assert_eq!(r.version, 70216);
+                format!("{}{}", r.user_agent, if r.unverified { "*" } else { "" })
+            })
+            .collect();
+        got.sort();
+        got
+    }
+
+    #[test]
+    fn census_counts_what_answered_in_the_window() {
+        let (_d, store) = open();
+        let t = 200_000;
+        let with = |agent: &str, chain: ChainCheck, height: i32| Outcome::Good {
+            version: 70216,
+            services: 1,
+            height,
+            harvested: false,
+            chain,
+            user_agent: agent.into(),
+        };
+        let rec = |addr: &str, o: Outcome, at: i64, r: Option<&str>| {
+            store.record(sa(addr), o, at, r).unwrap();
+        };
+        // Counted.
+        rec(
+            "8.8.8.1:8080",
+            with("/flap/", ChainCheck::Verified, 1000),
+            t - 100,
+            Some("A"),
+        );
+        rec("8.8.8.1:8080", Outcome::Bad, t - 50, Some("A"));
+        rec(
+            "8.8.8.2:8080",
+            with("/never/", ChainCheck::NotChecked, 1000),
+            t,
+            Some("A"),
+        );
+        rec(
+            "8.8.8.3:8080",
+            with("/verified/", ChainCheck::Verified, 1000),
+            t,
+            Some("A"),
+        );
+        rec(
+            "8.8.8.4:8080",
+            with("/low/", ChainCheck::Verified, 1),
+            t,
+            Some("A"),
+        );
+        // Exactly at the start of the window.
+        rec(
+            "8.8.8.11:8080",
+            with("/edge/", ChainCheck::Verified, 1000),
+            t - 86_400,
+            Some("A"),
+        );
+        // Left out.
+        rec(
+            "8.8.8.5:8080",
+            with("/old/", ChainCheck::Verified, 1000),
+            t - 86_401,
+            Some("A"),
+        );
+        rec(
+            "8.8.8.6:8080",
+            with("/fork/", ChainCheck::Verified, 1000),
+            t - 100,
+            Some("A"),
+        );
+        rec(
+            "8.8.8.6:8080",
+            Outcome::WrongChain { harvested: false },
+            t,
+            Some("A"),
+        );
+        rec(
+            "10.0.0.5:8080",
+            with("/private/", ChainCheck::Verified, 1000),
+            t,
+            Some("A"),
+        );
+        rec(
+            "8.8.8.9:9999",
+            with("/port/", ChainCheck::Verified, 1000),
+            t,
+            Some("A"),
+        );
+        rec("8.8.8.10:8080", Outcome::Bad, t, Some("A"));
+
+        let since = t - 86_400;
+        assert_eq!(
+            census_agents(&store, &policy(), since),
+            ["/edge/", "/flap/", "/low/", "/never/*", "/verified/"]
+        );
+        let any = ServablePolicy {
+            port: None,
+            allow_private: true,
+            ..policy()
+        };
+        assert_eq!(
+            census_agents(&store, &any, since),
+            [
+                "/edge/",
+                "/flap/",
+                "/low/",
+                "/never/*",
+                "/port/",
+                "/private/",
+                "/verified/"
+            ]
+        );
+    }
+
+    #[test]
+    fn census_never_counts_a_node_that_was_never_good() {
+        let (_d, store) = open();
+        store
+            .record(sa("8.8.8.1:8080"), Outcome::Bad, 10, None)
+            .unwrap();
+        assert!(store.census_rows(&policy(), -5).unwrap().is_empty());
     }
 
     #[test]
@@ -1211,6 +1841,7 @@ mod tests {
                     height: 1,
                     harvested: true,
                     chain: ChainCheck::NotChecked,
+                    user_agent: String::new(),
                 },
                 t,
                 None,
@@ -1363,10 +1994,10 @@ mod tests {
 
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 3)
+            .pragma_update(None, "user_version", 4)
             .unwrap();
         let err = NodeStore::open_existing(&path).err().unwrap().to_string();
-        assert!(err.contains("schema 3"), "{err}");
+        assert!(err.contains("schema 4"), "{err}");
     }
 
     fn checked(chain: ChainCheck) -> Outcome {
@@ -1376,6 +2007,7 @@ mod tests {
             height: 1000,
             harvested: false,
             chain,
+            user_agent: String::new(),
         }
     }
 
@@ -1475,6 +2107,7 @@ mod tests {
                     height: 1000,
                     harvested: true,
                     chain: ChainCheck::Verified,
+                    user_agent: String::new(),
                 },
                 t,
                 Some("A"),

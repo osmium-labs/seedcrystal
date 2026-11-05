@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use seedcrystal::census;
 use seedcrystal::coin::{Checkpoint, CoinPreset, builtin};
 use seedcrystal::crawler::{CrawlerConfig, Snapshot, spawn};
 use seedcrystal::p2p::{AddrEntry, ChainCheck, NetAddr, ProbeOptions, encode_addr};
@@ -32,6 +33,8 @@ fn config(path: &Path, bootstrap: Vec<SocketAddr>) -> CrawlerConfig {
         allow_private: true,
         bootstrap_retry: Duration::from_millis(300),
         bootstrap_source: None,
+        census_path: None,
+        census_interval: Duration::from_millis(200),
         probe: ProbeOptions {
             connect_timeout: Duration::from_secs(2),
             handshake_timeout: Duration::from_secs(3),
@@ -166,6 +169,121 @@ async fn unreachable_bootstrap_does_not_stop_crawl() {
     .await;
 }
 
+/// Waits until the census file parses and satisfies `ok`.
+async fn wait_for_census(path: &Path, ok: impl Fn(&census::Census) -> bool) -> census::Census {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(c) = census::read(path)
+            && ok(&c)
+        {
+            return c;
+        }
+        assert!(Instant::now() < deadline, "census not written within 10 s");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn census_counts_crawled_agents() {
+    bounded(async {
+        let dir = tempfile::tempdir().unwrap();
+        let p = preset();
+        let mut script = FakeScript::new(p.magic, p.protocol_version);
+        script.user_agent = "/Osmium Core:1.2.0/".into();
+        let a = FakePeer::spawn(script).0;
+        let store = dir.path().join("n.db");
+        let path = census::path_for(dir.path(), &p.id);
+        let mut cfg = config(&store, vec![a]);
+        cfg.census_path = Some(path.clone());
+        let token = CancellationToken::new();
+        let (_rx, handle) = spawn(cfg, token.clone()).unwrap();
+        let c = wait_for_census(&path, |c| {
+            c.agents
+                .iter()
+                .any(|r| r.user_agent == "/Osmium Core:1.2.0/" && r.nodes == 1)
+        })
+        .await;
+        assert_eq!(c.nodes, 1);
+        assert_eq!(c.min_protocol, p.min_peer_version);
+        assert_eq!(c.window_s, 86_400);
+        // The Osmium preset has no checkpoint, so no chain is ever checked.
+        assert_eq!(c.unverified, None);
+        token.cancel();
+        handle.await.unwrap().unwrap();
+        let agent: String = rusqlite::Connection::open(&store)
+            .unwrap()
+            .query_row("SELECT user_agent FROM nodes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(agent, "/Osmium Core:1.2.0/");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn census_is_written_at_start_from_the_store() {
+    bounded(async {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("n.db");
+        let start = unix_now();
+        {
+            let store = NodeStore::open(&store_path).unwrap();
+            let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+            store
+                .record(
+                    addr,
+                    Outcome::Good {
+                        version: preset().protocol_version,
+                        services: 1,
+                        height: 100,
+                        harvested: false,
+                        chain: ChainCheck::NotChecked,
+                        user_agent: "/stored:1/".into(),
+                    },
+                    start,
+                    None,
+                )
+                .unwrap();
+        }
+        let path = dir.path().join("census.json");
+        // A complete census from an earlier run, so only a fresh write can satisfy the wait.
+        let old = census::build(&[], 1, 0, 0, false);
+        std::fs::write(&path, serde_json::to_string(&old).unwrap()).unwrap();
+        assert_eq!(census::read(&path).unwrap().built_at, 1);
+        let mut cfg = config(&store_path, vec![]);
+        cfg.census_path = Some(path.clone());
+        cfg.census_interval = Duration::from_secs(3600);
+        let token = CancellationToken::new();
+        let (_rx, handle) = spawn(cfg, token.clone()).unwrap();
+        let c = wait_for_census(&path, |c| c.built_at >= start).await;
+        assert_eq!(c.nodes, 1);
+        assert_eq!(c.agents[0].user_agent, "/stored:1/");
+        token.cancel();
+        handle.await.unwrap().unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn an_unwritable_census_path_does_not_stop_the_crawl() {
+    bounded(async {
+        let dir = tempfile::tempdir().unwrap();
+        let b = fake(vec![]);
+        let a = fake(vec![entry(b)]);
+        let mut cfg = config(&dir.path().join("n.db"), vec![a]);
+        cfg.census_path = Some(dir.path().join("missing").join("census.json"));
+        let token = CancellationToken::new();
+        let (mut rx, handle) = spawn(cfg, token.clone()).unwrap();
+        wait_until(&mut rx, |s| {
+            [a, b].iter().all(|x| s.nodes.iter().any(|n| n.addr == *x))
+        })
+        .await;
+        assert!(!handle.is_finished());
+        token.cancel();
+        handle.await.unwrap().unwrap();
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn first_snapshot_comes_from_store() {
     bounded(async {
@@ -186,6 +304,7 @@ async fn first_snapshot_comes_from_store() {
                             height: 100,
                             harvested: false,
                             chain: ChainCheck::NotChecked,
+                            user_agent: String::new(),
                         },
                         now,
                         None,
@@ -438,6 +557,7 @@ async fn one_fork_node_among_verified_nodes_does_not_warn() {
                             height: 100,
                             harvested: true,
                             chain: ChainCheck::Verified,
+                            user_agent: String::new(),
                         },
                         now - 900,
                         Some(&reference),

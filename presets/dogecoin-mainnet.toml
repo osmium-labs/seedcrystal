@@ -1,0 +1,21 @@
+# Every value is cited from dogecoin/dogecoin@v1.14.9
+# (e0a1c157791544e818c901bd9341896965afbf9d).
+
+id = "dogecoin-mainnet"
+magic = "c0c0c0c0"            # src/chainparams.cpp:148-151
+default_port = 22556          # src/chainparams.cpp:152
+protocol_version = 70015      # src/version.h:14 (PROTOCOL_VERSION)
+min_peer_version = 70003      # src/version.h:23 (MIN_PEER_PROTO_VERSION), src/net_processing.cpp:1415
+version_trailer = "none"
+block_interval_secs = 60      # src/chainparams.cpp:90 (nPowTargetSpacing)
+# No addrv2_min_version: there is no sendaddrv2 anywhere under src/ (grep -ri).
+# Nodes query the plain name. GetDNSHost returns the bare host while the required services are
+# NODE_NETWORK (src/net.cpp:1586-1596), and they are nRelevantServices = NODE_NETWORK
+# (src/init.cpp:805). NODE_WITNESS is added only when SegWit has a deployment (:1628-1636), and
+# it is disabled (src/chainparams.cpp:111). The plain name serves nodes whose services include
+# seed_flags, so seed_flags is that requirement, NODE_NETWORK = 1 (src/protocol.h:261).
+seed_flags = 0x1
+filters = [0x1]
+# src/chainparams.cpp:164-165
+bootstrap_dns = ["seed.multidoge.org", "seed2.multidoge.org"]
+bootstrap_fixed = []

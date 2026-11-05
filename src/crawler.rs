@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -14,6 +14,7 @@ use tokio::time::{MissedTickBehavior, interval, sleep, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::census;
 use crate::coin::{Checkpoint, CoinPreset};
 use crate::p2p::{AddrEntry, ChainCheck, NetAddr, ProbeOptions, probe};
 use crate::store::{Due, NodeStore, Outcome, Servable, ServablePolicy};
@@ -54,10 +55,15 @@ pub struct CrawlerConfig {
     pub bootstrap_retry: Duration,
     /// Optional dynamic bootstrap source, consulted on every attempt.
     pub bootstrap_source: Option<BootstrapSource>,
+    /// Where the census is written, if anywhere.
+    pub census_path: Option<PathBuf>,
+    /// Least time between two census writes.
+    pub census_interval: Duration,
 }
 
 impl CrawlerConfig {
-    /// Defaults: 64 concurrent probes, a snapshot every 30 s, public peers only.
+    /// Defaults: 64 concurrent probes, a snapshot every 30 s, public peers only, no census
+    /// file (written every 60 s once a path is set).
     pub fn new(preset: CoinPreset, store_path: PathBuf) -> Self {
         let probe = ProbeOptions {
             addr_wait: preset.addr_wait,
@@ -73,6 +79,8 @@ impl CrawlerConfig {
             probe,
             bootstrap_retry: Duration::from_secs(60),
             bootstrap_source: None,
+            census_path: None,
+            census_interval: Duration::from_secs(60),
         }
     }
 }
@@ -113,7 +121,10 @@ struct Shared {
     accept_port: Option<u16>,
     preset_id: String,
     checkpoint: Option<Checkpoint>,
-    /// Checkpoint verdicts since the last snapshot.
+    census_path: Option<PathBuf>,
+    /// The preset's handshake floor, stated in the census.
+    min_protocol: i32,
+    /// Checkpoint verdicts since the crawler started.
     tally: Mutex<ChainTally>,
     /// When the wrong-checkpoint warning last fired.
     last_warning: Mutex<Option<std::time::Instant>>,
@@ -121,8 +132,8 @@ struct Shared {
 
 #[derive(Default)]
 struct ChainTally {
-    verified: u32,
-    wrong: u32,
+    verified: u64,
+    wrong: u64,
 }
 
 impl Shared {
@@ -136,15 +147,17 @@ impl Shared {
     }
 
     /// A mistyped checkpoint makes every node wrong chain and empties the seed, so say so
-    /// when wrong chain is the majority of this interval's verdicts, at most once per
-    /// [`WRONG_CHECKPOINT_WARN_EVERY`]: an empty seed rebuilds every 2 s. Returns whether it
-    /// warned.
+    /// when wrong chain is the majority of the run's verdicts, at most once per
+    /// [`WRONG_CHECKPOINT_WARN_EVERY`]: an empty seed rebuilds every 2 s. The whole run is
+    /// judged, not one interval, because a chain sharing its magic and port with others meets
+    /// their nodes all the time, and a quiet interval can hold more of them than of its own.
+    /// Returns whether it warned.
     fn warn_on_wrong_checkpoint(&self) -> bool {
-        let t = std::mem::take(&mut *self.tally.lock().unwrap_or_else(|e| e.into_inner()));
         let Some(c) = &self.checkpoint else {
             return false;
         };
-        if t.wrong >= 1 && t.wrong > t.verified {
+        let t = self.tally.lock().unwrap_or_else(|e| e.into_inner());
+        if t.wrong + t.verified >= MIN_CHECKPOINT_VERDICTS && t.wrong > t.verified {
             let mut last = self.last_warning.lock().unwrap_or_else(|e| e.into_inner());
             if last.is_some_and(|at| at.elapsed() < WRONG_CHECKPOINT_WARN_EVERY) {
                 return false;
@@ -153,7 +166,7 @@ impl Shared {
             warn!(
                 checkpoint_height = c.height,
                 checkpoint_hash = %c.display_hash(),
-                "{}: {} of {} checked nodes are on the wrong chain; is the preset checkpoint right?",
+                "{}: {} of {} checkpoint checks so far found the wrong chain; is the preset checkpoint right?",
                 self.preset_id,
                 t.wrong,
                 t.wrong + t.verified
@@ -215,6 +228,8 @@ pub fn spawn(
         policy,
         preset_id: cfg.preset.id.clone(),
         checkpoint: cfg.preset.checkpoint.clone(),
+        census_path: cfg.census_path.clone(),
+        min_protocol: cfg.preset.min_peer_version,
         tally: Mutex::default(),
         last_warning: Mutex::default(),
     });
@@ -224,6 +239,9 @@ pub fn spawn(
 
 /// Rebuild period while the published snapshot is empty.
 const EMPTY_SNAPSHOT_PERIOD: Duration = Duration::from_secs(2);
+
+/// Verdicts needed before the wrong-checkpoint warning judges them.
+const MIN_CHECKPOINT_VERDICTS: u64 = 3;
 
 /// Least time between two wrong-checkpoint warnings.
 const WRONG_CHECKPOINT_WARN_EVERY: Duration = Duration::from_secs(10 * 60);
@@ -256,6 +274,7 @@ async fn run(
     ));
     aux.spawn(snapshot_task(
         cfg.snapshot_interval,
+        cfg.census_interval,
         Arc::clone(&shared),
         tx,
         shutdown.clone(),
@@ -320,13 +339,55 @@ async fn bootstrap_task(
     }
 }
 
+fn write_census(
+    store: &NodeStore,
+    policy: &ServablePolicy,
+    min_protocol: i32,
+    path: &Path,
+    now: i64,
+) -> Result<()> {
+    let rows = store.census_rows(policy, now - census::WINDOW_S)?;
+    let tip = store.tip(policy, now)?;
+    crate::jsonfile::write_atomic(
+        path,
+        &census::build(
+            &rows,
+            now,
+            tip,
+            min_protocol,
+            policy.checkpoint_ref.is_some(),
+        ),
+    )
+}
+
+/// Writes the census if a path is set; a failure is logged and the crawl goes on.
+async fn census_now(shared: &Shared) {
+    let Some(path) = shared.census_path.clone() else {
+        return;
+    };
+    let policy = shared.policy.clone();
+    let min_protocol = shared.min_protocol;
+    let now = unix_now();
+    let written = blocking(&shared.store, move |s| {
+        write_census(s, &policy, min_protocol, &path, now)
+    })
+    .await;
+    if let Err(e) = written {
+        warn!("census: {e:#}");
+    }
+}
+
 async fn snapshot_task(
     period: Duration,
+    census_every: Duration,
     shared: Arc<Shared>,
     tx: watch::Sender<Arc<Snapshot>>,
     shutdown: CancellationToken,
 ) {
     let period = period.max(Duration::from_millis(10));
+    // Right after the first snapshot, so a restart does not leave the last run's file.
+    census_now(&shared).await;
+    let mut census_at = tokio::time::Instant::now();
     loop {
         // A seeder with nothing to serve rebuilds quickly, so its first nodes appear soon.
         let wait = if tx.borrow().nodes.is_empty() {
@@ -351,6 +412,10 @@ async fn snapshot_task(
                 tx.send_replace(Arc::new(s));
             }
             Err(e) => warn!(error = %e, "snapshot rebuild failed"),
+        }
+        if census_at.elapsed() >= census_every {
+            census_now(&shared).await;
+            census_at = tokio::time::Instant::now();
         }
         let _ = shared.warn_on_wrong_checkpoint();
     }
@@ -466,6 +531,7 @@ async fn probe_one(
                 height: r.peer.start_height,
                 harvested: harvest,
                 chain: r.chain,
+                user_agent: r.peer.user_agent,
             },
             r.addrs,
         ),
@@ -499,6 +565,8 @@ mod tests {
             accept_port: None,
             preset_id: preset.id,
             checkpoint,
+            census_path: None,
+            min_protocol: 0,
             tally: Mutex::default(),
             last_warning: Mutex::default(),
         }
@@ -526,6 +594,34 @@ mod tests {
         *s.last_warning.lock().unwrap() =
             Some(std::time::Instant::now() - WRONG_CHECKPOINT_WARN_EVERY);
         s.count(ChainCheck::WrongChain);
+        assert!(s.warn_on_wrong_checkpoint());
+    }
+
+    #[test]
+    fn a_wrong_majority_in_one_interval_is_judged_against_the_whole_run() {
+        // bitcoincash-mainnet, 2026-11-05: 138 verified against 6 wrong over ten minutes, but
+        // one quiet interval held 2 wrong of 3 (eCash and BSV share the magic and port).
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path(), Some(CP));
+        for _ in 0..138 {
+            s.count(ChainCheck::Verified);
+        }
+        assert!(!s.warn_on_wrong_checkpoint());
+        s.count(ChainCheck::WrongChain);
+        s.count(ChainCheck::WrongChain);
+        s.count(ChainCheck::Verified);
+        assert!(!s.warn_on_wrong_checkpoint());
+    }
+
+    #[test]
+    fn too_few_verdicts_are_not_judged() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path(), Some(CP));
+        s.count(ChainCheck::WrongChain);
+        assert!(!s.warn_on_wrong_checkpoint());
+        s.count(ChainCheck::WrongChain);
+        assert!(!s.warn_on_wrong_checkpoint());
+        s.count(ChainCheck::Verified);
         assert!(s.warn_on_wrong_checkpoint());
     }
 
