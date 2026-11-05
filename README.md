@@ -78,18 +78,18 @@ There are two ways to publish the snapshot. Pick one per seed name:
 
 | Preset | Coin | Network | P2P port | Tested |
 |---|---|---|---|---|
-| `bitcoin-mainnet` | Bitcoin | mainnet | 8333 | offline |
-| `bitcoin-testnet4` | Bitcoin | testnet4 | 48333 | offline |
+| `bitcoin-mainnet` | Bitcoin | mainnet | 8333 | offline (2026-10-26) |
+| `bitcoin-testnet4` | Bitcoin | testnet4 | 48333 | offline (2026-10-26) |
 | `dash-mainnet` | Dash | mainnet | 9999 | live crawl (2026-11-05) |
 | `dash-testnet` | Dash | testnet | 19999 | live crawl (2026-11-05) |
 | `litecoin-mainnet` | Litecoin | mainnet | 9333 | live crawl (2026-11-05) |
 | `litecoin-testnet` | Litecoin | testnet | 19335 | live crawl (2026-11-05) |
-| `osmium-mainnet` | Osmium | mainnet | 9969 | end-to-end |
-| `osmium-testnet` | Osmium | testnet | 19969 | end-to-end |
-| `raptoreum-mainnet` | Raptoreum | mainnet | 10226 | offline |
-| `raptoreum-testnet` | Raptoreum | testnet | 10230 | end-to-end |
+| `osmium-mainnet` | Osmium | mainnet | 9969 | end-to-end (2026-10-25) |
+| `osmium-testnet` | Osmium | testnet | 19969 | end-to-end (2026-10-25) |
+| `raptoreum-mainnet` | Raptoreum | mainnet | 10226 | end-to-end (2026-10-26) |
+| `raptoreum-testnet` | Raptoreum | testnet | 10230 | end-to-end (2026-10-26) |
 
-"Tested" says how far a preset has been checked against the coin's real nodes:
+"Tested" says how far a preset has been checked against the coin's real nodes, and when:
 
 - **end-to-end**: a stock node of the coin, started with an empty data directory, takes its
   first peers from Seedcrystal;
