@@ -1,0 +1,27 @@
+# Every value is cited from Bitcoin-ABC/bitcoin-abc@v0.34.3
+# (5621f13e073c007bed66a35fdfda3bc67772bab6).
+
+id = "ecash-mainnet"
+magic = "e3e1f3e8"            # src/kernel/chainparams.cpp:164-167 (netMagic)
+default_port = 8333           # src/kernel/chainparams.cpp:168
+protocol_version = 70017      # src/node/protocol_version.h:18 (PROTOCOL_VERSION)
+min_peer_version = 70016      # src/node/protocol_version.h:15 (MIN_PEER_PROTO_VERSION), src/net_processing.cpp:5113
+version_trailer = "none"
+block_interval_secs = 600     # src/kernel/chainparams.cpp:103 (nPowTargetSpacing = 10 * 60)
+# After verack only: any message but verack before it is Misbehaving (src/net_processing.cpp:
+# 5358-5361), and nodes send their own sendaddrv2 after verack to every peer (:5169-5172), so
+# every peer above the floor takes it (:5488-5491).
+addrv2_min_version = 70016
+addrv2_placement = "after_verack"
+# The DNS name is x%x.<seed> (src/net.cpp:1673) with GetDesirableServiceFlags(NODE_NONE), which
+# returns NODE_NETWORK (src/protocol.cpp:156-162), and NODE_NETWORK = 1 (src/protocol.h:342), so
+# nodes query x1.
+seed_flags = 0x1
+filters = [0x1, 0x5]
+# BCH and BSV share the magic and port, so only nodes proven on this chain are served.
+# src/networks/abc/checkpoints.cpp:107-109: the newest mainNetCheckpointData entry (Obolensky
+# activation), after the split at axionHeight 661647 (src/kernel/chainparams.cpp:141).
+checkpoint = { height = 949200, hash = "000000000000000098694560815190dba8bbe2f06c08a7c23837df3c4886cba2" }
+# src/kernel/chainparams.cpp:192-196
+bootstrap_dns = ["seed.bitcoinabc.org", "seeder.fabien.cash", "seeder.status.cash"]
+bootstrap_fixed = []
