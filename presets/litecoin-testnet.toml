@@ -19,6 +19,6 @@ seed_flags = 0x1000009
 filters = [0x1, 0x5, 0x9, 0xd, 0x1000009, 0x100000d]
 # src/chainparams.cpp:253-255
 bootstrap_dns = ["testnet-seed.litecointools.com", "seed-b.litecoin.loshan.co.uk", "dnsseed-testnet.thrasher.io"]
-# src/chainparamsseeds.h:94-98 (chainparams_seed_test, loaded at src/chainparams.cpp:267): the
-# entries on default_port, contrib/seeds/nodes_test.txt:1-5.
+# src/chainparamsseeds.h:94-98 (chainparams_seed_test, loaded at src/chainparams.cpp:267): its
+# first five entries, all on default_port (contrib/seeds/nodes_test.txt:1-5).
 bootstrap_fixed = ["217.72.4.157:19335", "65.108.201.113:19335", "81.177.159.44:19335", "23.88.68.160:19335", "162.55.210.70:19335"]
