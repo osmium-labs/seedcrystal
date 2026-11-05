@@ -3,6 +3,7 @@
 //! Synchronous; async callers wrap it in `spawn_blocking`. Times are unix
 //! seconds supplied by the caller, never read from the clock here.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -12,6 +13,7 @@ use rusqlite::{Connection, OpenFlags, params};
 use tracing::info;
 
 use crate::coin::{VersionStep, serve_floor};
+use crate::dns::answer::netgroup;
 use crate::p2p::ChainCheck;
 use crate::p2p::messages::{AddrEntry, NetAddr};
 use crate::score::Stats;
@@ -538,38 +540,51 @@ impl NodeStore {
         Ok(out)
     }
 
-    /// Network tip as seen by this store: the 3rd-highest height among nodes
-    /// that pass every non-height servable check (a verified chain among them,
-    /// when a checkpoint is set) and were good within 2 h
-    /// (the maximum if fewer than 3 qualify, 0 if none). One node lying about
-    /// its height therefore cannot move the tip.
+    /// Network tip as seen by this store, from nodes that pass every non-height servable check
+    /// (a verified chain among them, when a checkpoint is set) and were good within 2 h. Each
+    /// network group (see [`netgroup`]) votes once, with its nodes' median height, and the tip
+    /// is the highest height that a third of the groups reach, but at least three of them (all
+    /// of them below three; 0 if none). Moving the tip therefore takes nodes in a third of the
+    /// network's groups, not a few nodes reporting a false height.
     pub fn tip(&self, policy: &ServablePolicy, now: i64) -> Result<i32> {
         let conn = self.conn();
         let mut stmt = conn.prepare_cached(
-            "SELECT height FROM nodes
+            "SELECT ip, height FROM nodes
              WHERE last_ok = 1 AND last_good >= ?1 AND version >= ?2
                AND (routable = 1 OR ?3) AND (?4 IS NULL OR port = ?4)
-               AND (?5 IS NULL OR (chain = 1 AND chain_ref = ?5))
-             ORDER BY height DESC LIMIT 3",
+               AND (?5 IS NULL OR (chain = 1 AND chain_ref = ?5))",
         )?;
-        let heights: Vec<i32> = stmt
-            .query_map(
-                params![
-                    now - TIP_WINDOW,
-                    policy.serve_floor_base,
-                    policy.allow_private,
-                    policy.port,
-                    policy.checkpoint_ref
-                ],
-                |r| r.get(0),
-            )?
-            .collect::<rusqlite::Result<_>>()?;
-        let tip = if heights.len() < 3 {
-            heights.first()
-        } else {
-            heights.last()
-        };
-        Ok(tip.copied().unwrap_or(0))
+        let rows = stmt.query_map(
+            params![
+                now - TIP_WINDOW,
+                policy.serve_floor_base,
+                policy.allow_private,
+                policy.port,
+                policy.checkpoint_ref
+            ],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)?)),
+        )?;
+        let mut groups: HashMap<(bool, [u8; 4]), Vec<i32>> = HashMap::new();
+        for row in rows {
+            let (ip, height) = row?;
+            let Ok(ip) = ip.parse::<IpAddr>() else {
+                continue;
+            };
+            groups
+                .entry((ip.is_ipv6(), netgroup(&ip)))
+                .or_default()
+                .push(height);
+        }
+        let mut votes: Vec<i32> = groups
+            .into_values()
+            .map(|mut heights| {
+                heights.sort_unstable();
+                heights[heights.len() / 2]
+            })
+            .collect();
+        votes.sort_unstable_by(|a, b| b.cmp(a));
+        let quorum = votes.len().div_ceil(3).max(3).min(votes.len());
+        Ok(quorum.checked_sub(1).map_or(0, |i| votes[i]))
     }
 
     /// The nodes the census counts: good at `since` or later, routable (unless the policy
@@ -891,6 +906,75 @@ mod tests {
         assert_eq!(addrs(&store, &policy(), 110).len(), 5);
     }
 
+    /// One node at `height` in each of `groups` IPv4 /16 network groups, starting at `first`.
+    fn nodes_in_groups(store: &NodeStore, first: u8, groups: u8, height: i32, t: i64) {
+        for g in first..first + groups {
+            store
+                .record(sa(&format!("9.{g}.0.1:8080")), good(height), t, None)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn liars_in_fewer_than_a_third_of_the_groups_cannot_move_the_tip() {
+        // bitcoin-mainnet, 2026-11-05: seven nodes claiming a height ~5,900 blocks ahead set the
+        // 3rd-highest tip, and the seed served only them.
+        let (_d, store) = open();
+        let t = 100;
+        nodes_in_groups(&store, 0, 30, 1000, t);
+        nodes_in_groups(&store, 100, 7, 6000, t);
+        assert_eq!(store.tip(&policy(), t).unwrap(), 1000);
+        let served = addrs(&store, &policy(), t + 10);
+        for g in 0..30 {
+            assert!(
+                served.contains(&sa(&format!("9.{g}.0.1:8080"))),
+                "9.{g}.0.1 not served"
+            );
+        }
+    }
+
+    #[test]
+    fn many_liars_in_one_group_count_once() {
+        let (_d, store) = open();
+        let t = 100;
+        nodes_in_groups(&store, 0, 5, 1000, t);
+        for i in 1..=10 {
+            store
+                .record(sa(&format!("7.7.0.{i}:8080")), good(6000), t, None)
+                .unwrap();
+        }
+        assert_eq!(store.tip(&policy(), t).unwrap(), 1000);
+    }
+
+    #[test]
+    fn one_liar_in_an_honest_group_does_not_speak_for_it() {
+        let (_d, store) = open();
+        let t = 100;
+        for i in 1..=3 {
+            store
+                .record(sa(&format!("7.7.0.{i}:8080")), good(1000), t, None)
+                .unwrap();
+        }
+        store
+            .record(sa("7.7.0.9:8080"), good(6000), t, None)
+            .unwrap();
+        nodes_in_groups(&store, 0, 2, 1000, t);
+        assert_eq!(store.tip(&policy(), t).unwrap(), 1000);
+    }
+
+    #[test]
+    fn a_third_of_the_groups_sets_the_tip() {
+        let (_d, store) = open();
+        let t = 100;
+        // 9 groups: the 3 highest are a third of them.
+        nodes_in_groups(&store, 0, 3, 1010, t);
+        nodes_in_groups(&store, 10, 6, 1000, t);
+        assert_eq!(store.tip(&policy(), t).unwrap(), 1010);
+        // 12 groups: 3 are no longer a third, so the tip is the 4th highest.
+        nodes_in_groups(&store, 20, 3, 1000, t);
+        assert_eq!(store.tip(&policy(), t).unwrap(), 1000);
+    }
+
     #[test]
     fn tip_rule_is_unchanged_below_three_nodes() {
         let (_d, store) = open();
@@ -1016,12 +1100,13 @@ mod tests {
             };
             store.record(sa(ip), outcome, t, Some(reference)).unwrap();
         };
+        // Every node in its own network group, so each one votes.
         for i in 0..3 {
-            verified(&store, &format!("8.8.8.{}:8080", i + 1), 1000, "A");
-            verified(&store, &format!("8.8.7.{}:8080", i + 1), 8_000_000, "B");
+            verified(&store, &format!("8.{}.0.1:8080", i + 1), 1000, "A");
+            verified(&store, &format!("8.{}.0.1:8080", i + 11), 8_000_000, "B");
             store
                 .record(
-                    sa(&format!("8.8.9.{}:8080", i + 1)),
+                    sa(&format!("8.{}.0.1:8080", i + 21)),
                     good(9_000_000),
                     t,
                     Some("A"),
@@ -1062,12 +1147,12 @@ mod tests {
     }
 
     #[test]
-    fn tip_is_third_highest_and_ignores_unqualified_nodes() {
+    fn tip_is_third_highest_of_few_groups_and_ignores_unqualified_nodes() {
         let (_d, store) = open();
         let t = 100;
         for (i, h) in [1000, 1001, 1002, 999, 1000].iter().enumerate() {
             store
-                .record(sa(&format!("8.8.8.{}:8080", i + 1)), good(*h), t, None)
+                .record(sa(&format!("8.{}.8.1:8080", i + 1)), good(*h), t, None)
                 .unwrap();
         }
         assert_eq!(store.tip(&policy(), t).unwrap(), 1000);

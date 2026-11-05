@@ -38,9 +38,10 @@ hard-coded addresses. Seedcrystal is built to get this right the first time:
   versions, service bits. Each built-in preset cites the line of the coin's source that every
   value came from.
 - **It serves only nodes worth connecting to.** Reliability is scored over five windows, from
-  two hours to a month. A chain-tip height floor ignores a single node lying about its height,
-  an optional checkpoint keeps forks out, and each answer holds at most two addresses per IPv4
-  /16 or IPv6 /32.
+  two hours to a month. A chain-tip height floor drops nodes that lag the tip, and the tip is
+  what a third of the network's /16 groups agree on, so a few nodes lying about their height
+  cannot move it. An optional checkpoint keeps forks out, and each answer holds at most two
+  addresses per IPv4 /16 or IPv6 /32.
 - **Two ways to publish.** A built-in authoritative DNS server (UDP and TCP, no separate DNS
   software), or Cloudflare mode, which keeps A and AAAA records in your zone and never touches
   records it did not create.
