@@ -384,6 +384,8 @@ fn reference_agents_cover_every_builtin_family() {
     let ids = [
         "bitcoin-mainnet",
         "bitcoin-testnet4",
+        "dash-mainnet",
+        "dash-testnet",
         "osmium-mainnet",
         "osmium-testnet",
         "raptoreum-mainnet",

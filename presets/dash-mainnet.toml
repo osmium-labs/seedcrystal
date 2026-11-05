@@ -1,0 +1,23 @@
+# Every value is cited from dashpay/dash@v23.1.10
+# (703b2a08de17982461f5ae5cb7662119ff5d1591).
+
+id = "dash-mainnet"
+magic = "bf0c6bbd"            # src/chainparams.cpp:229-232
+default_port = 9999           # src/chainparams.cpp:233
+protocol_version = 70240      # src/version.h:14 (PROTOCOL_VERSION)
+min_peer_version = 70221      # src/version.h:20 (MIN_PEER_PROTO_VERSION), src/net_processing.cpp:3945
+# src/net_processing.cpp:3967-3976: the masternode challenge and flag after relay are read only
+# under if (!vRecv.empty()), so a version message without them is accepted.
+version_trailer = "none"
+block_interval_secs = 150     # src/chainparams.cpp:200 (nPowTargetSpacing = 2.5 * 60)
+# src/version.h:26 (ADDRV2_PROTO_VERSION). src/net_processing.cpp:4249-4262: sendaddrv2 is
+# negotiated between version and verack; after verack the peer is disconnected.
+addrv2_min_version = 70223
+addrv2_placement = "before_verack"
+# The DNS name is x%x.<seed> from GetDesirableServiceFlags(NODE_NONE) (src/net.cpp:2782-2783),
+# which returns NODE_NETWORK (src/protocol.cpp:251-256), and NODE_NETWORK = 1 (src/protocol.h:317),
+# so nodes query x1.
+seed_flags = 0x1
+filters = [0x1, 0x5]
+bootstrap_dns = ["dnsseed.dash.org"]   # src/chainparams.cpp:250
+bootstrap_fixed = []
