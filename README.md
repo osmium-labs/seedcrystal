@@ -76,18 +76,28 @@ There are two ways to publish the snapshot. Pick one per seed name:
 
 ## Supported coins
 
-| Preset | Coin | Network | P2P port |
-|---|---|---|---|
-| `bitcoin-mainnet` | Bitcoin | mainnet | 8333 |
-| `bitcoin-testnet4` | Bitcoin | testnet4 | 48333 |
-| `osmium-mainnet` | Osmium | mainnet | 9969 |
-| `osmium-testnet` | Osmium | testnet | 19969 |
-| `raptoreum-mainnet` | Raptoreum | mainnet | 10226 |
-| `raptoreum-testnet` | Raptoreum | testnet | 10230 |
+| Preset | Coin | Network | P2P port | Tested |
+|---|---|---|---|---|
+| `bitcoin-mainnet` | Bitcoin | mainnet | 8333 | offline |
+| `bitcoin-testnet4` | Bitcoin | testnet4 | 48333 | offline |
+| `dash-mainnet` | Dash | mainnet | 9999 | live crawl (2026-11-05) |
+| `dash-testnet` | Dash | testnet | 19999 | live crawl (2026-11-05) |
+| `osmium-mainnet` | Osmium | mainnet | 9969 | end-to-end |
+| `osmium-testnet` | Osmium | testnet | 19969 | end-to-end |
+| `raptoreum-mainnet` | Raptoreum | mainnet | 10226 | offline |
+| `raptoreum-testnet` | Raptoreum | testnet | 10230 | end-to-end |
 
-`seedcrystal presets` lists them with their port, seed name prefix and protocol version. Osmium and Raptoreum pass the end-to-end release gate: a stock
-node with an empty data directory takes its first peers from Seedcrystal. Another coin needs
-only a preset file; see [Adding a coin](#adding-a-coin-preset-reference).
+"Tested" says how far a preset has been checked against the coin's real nodes:
+
+- **end-to-end**: a stock node with an empty data directory takes its first peers from
+  Seedcrystal (the release gate, and the live Osmium seed);
+- **live crawl**: Seedcrystal completed handshakes with the coin's nodes, then crawled its
+  network for ten minutes and served nodes running the coin's own client;
+- **handshake**: handshakes only, for a testnet with too few nodes to crawl;
+- **offline**: unit tests and the citations; not yet run against the coin's nodes.
+
+`seedcrystal presets` lists them with their port, seed name prefix and protocol version.
+Another coin needs only a preset file; see [Adding a coin](#adding-a-coin-preset-reference).
 
 ## Install
 
